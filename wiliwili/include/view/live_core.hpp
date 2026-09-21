@@ -6,7 +6,7 @@
 
 #include <chrono>
 #include <deque>
-#include <mutex>
+#include <borealis/core/xbox360_mutex.hpp>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -84,7 +84,7 @@ public:
     float line_height;
 
     std::deque<LiveDanmakuItem> next;
-    std::mutex next_mutex;
+    brls::PlatformMutex next_mutex;
 
     std::map<int, std::deque<LiveDanmakuItem>> now;
     

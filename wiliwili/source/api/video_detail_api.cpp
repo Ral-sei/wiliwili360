@@ -58,11 +58,15 @@ void BilibiliClient::get_webmask(const std::string& url, int64_t rangeStart, int
     session->SetUrl(cpr::Url{url});
     session->GetCallback<>(
         [callback, error](const cpr::Response& r) {
+#if defined(__cpp_exceptions)
             try {
+#endif
                 callback(r.text);
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG("Network error. [Status code: " + std::to_string(r.status_code) + " ]", r.status_code);
             }
+#endif
         });
 }
 
@@ -239,14 +243,18 @@ void BilibiliClient::get_live_pay_info(int roomid, const std::function<void(Live
     HTTP::_cpr_get(
         Api::RoomPayInfo, {{"room_id", std::to_string(roomid)}},
         [callback, error](const cpr::Response& r) {
+#if defined(__cpp_exceptions)
             try {
+#endif
                 nlohmann::json res = nlohmann::json::parse(r.text);
                 auto ret           = res.at("data").get<LivePayInfo>();
                 ret.message        = res.at("message").get<std::string>();
                 if (callback) callback(ret);
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG("cannot get live pay info", -1);
             }
+#endif
         },
         error);
 }
@@ -302,11 +310,15 @@ void BilibiliClient::get_danmaku(uint64_t cid, const std::function<void(std::str
                 ERROR_MSG(r.error.message, r.status_code);
                 return;
             }
+#if defined(__cpp_exceptions)
             try {
+#endif
                 callback(r.text);
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG(e.what(), -1);
             }
+#endif
         });
 }
 
@@ -322,12 +334,16 @@ void BilibiliClient::get_highlight_progress(uint64_t cid,
                 ERROR_MSG(r.error.message, r.status_code);
                 return;
             }
+#if defined(__cpp_exceptions)
             try {
+#endif
                 nlohmann::json res = nlohmann::json::parse(r.text);
                 callback(res.get<VideoHighlightProgress>());
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG(e.what(), -1);
             }
+#endif
         });
 }
 
@@ -347,16 +363,20 @@ void BilibiliClient::get_video_snapshot(const std::string& bvid, uint64_t cid,
                 ERROR_MSG(r.error.message, r.status_code);
                 return;
             }
+#if defined(__cpp_exceptions)
             try {
+#endif
                 nlohmann::json res = nlohmann::json::parse(r.text);
                 if (res["code"] != 0) {
                     ERROR_MSG(res["message"].get<std::string>(), res["code"].get<int>());
                     return;
                 }
                 HTTP_CALLBACK(res["data"].get<VideoSnapshotData>());
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG(e.what(), -1);
             }
+#endif
         });
 }
 
@@ -366,14 +386,18 @@ void BilibiliClient::get_subtitle(const std::string& link, const std::function<v
     session->SetUrl(cpr::Url{link});
     session->GetCallback<>(
         [callback, error](const cpr::Response& r) {
+#if defined(__cpp_exceptions)
             try {
+#endif
                 nlohmann::json res = nlohmann::json::parse(r.text);
                 callback(res.get<SubtitleData>());
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG("Network error. [Status code: " + std::to_string(r.status_code) + " ]", r.status_code);
                 printf("data: %s\n", r.text.c_str());
                 printf("ERROR: %s\n", e.what());
             }
+#endif
         });
 }
 

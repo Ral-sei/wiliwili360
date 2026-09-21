@@ -1,19 +1,43 @@
 #include "bilibili.h"
 #include "bilibili/util/http.hpp"
+#if defined(PLATFORM_XBOX360)
+#include <xtl.h>
+extern "C" int __stdcall XNetRandom(unsigned char*, unsigned int);
+#else
 #include <random>
+#endif
 #include <utility>
+#include <vector>
 
 namespace bilibili {
 
 std::string genRandomHex(int length) {
     char seed[17] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', '\0'};
 
+#if defined(PLATFORM_XBOX360)
+    if (length <= 0)
+        return {};
+
+    std::vector<BYTE> randomBytes(static_cast<size_t>(length));
+    if (XNetRandom(randomBytes.data(), static_cast<UINT>(randomBytes.size())) != 0) {
+        DWORD state = GetTickCount() ^ static_cast<DWORD>(length);
+        for (auto& byte : randomBytes) {
+            state = state * 1664525u + 1013904223u;
+            byte  = static_cast<BYTE>(state >> 24);
+        }
+    }
+#else
     static std::random_device rd;
     static std::mt19937 gen(rd());
     static std::uniform_int_distribution<> dis(0, 15);
+#endif
     std::string text;
     for (int n = 0; n < length; ++n) {
+#if defined(PLATFORM_XBOX360)
+        int val = randomBytes[static_cast<size_t>(n)] & 0x0f;
+#else
         int val = dis(gen);
+#endif
         text += seed[val];
     }
     return text;

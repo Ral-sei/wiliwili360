@@ -170,8 +170,16 @@ void LiveDataRequest::requestLiveAnchorTitle(int roomid) {
     session->GetCallback<>(
         [ASYNC_TOKEN](const cpr::Response& r) {
             if (r.status_code == 200) {
+#if defined(__cpp_exceptions)
                 try {
                     auto json = nlohmann::json::parse(r.text);
+#else
+                    auto json = nlohmann::json::parse(r.text, nullptr, false);
+                    if (json.is_discarded()) {
+                        brls::Logger::error("Failed to parse anchor title data");
+                        ASYNC_RELEASE
+                    }
+#endif
                     std::string title = "";
                     
                     if (json.contains("data") && json["data"].contains("info") && 
@@ -184,10 +192,12 @@ void LiveDataRequest::requestLiveAnchorTitle(int roomid) {
                         ASYNC_RELEASE
                         this->onAnchorTitleInfo(title);
                     });
+#if defined(__cpp_exceptions)
                 } catch (const std::exception& e) {
                     brls::Logger::error("Failed to parse anchor title data: {}", e.what());
                     ASYNC_RELEASE
                 }
+#endif
             } else {
                 brls::Logger::error("Failed to get anchor title: HTTP {}", r.status_code);
                 ASYNC_RELEASE

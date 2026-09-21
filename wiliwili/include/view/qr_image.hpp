@@ -63,8 +63,8 @@ public:
     [[nodiscard]] std::string toSvgString() const {
         int size   = qr.getSize();
         int border = this->QRBorder;
-        if (border < 0) throw std::domain_error("Border must be non-negative");
-        if (border > INT_MAX / 2 || border * 2 > INT_MAX - size) throw std::overflow_error("Border too large");
+        // Xbox 360 builds disable C++ exceptions; reject invalid values without throwing.
+        if (border < 0 || border > INT_MAX / 2 || border * 2 > INT_MAX - size) return {};
 
         std::ostringstream sb;
         sb << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";

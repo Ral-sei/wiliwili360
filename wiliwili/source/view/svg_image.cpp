@@ -78,7 +78,7 @@ void SVGImage::setImageFromSVGRes(const std::string& value) {
         brls::Logger::error("svg got zero tex: {} {}", value, tex);
     }
 #else
-    this->setImageFromSVGFile(std::string(BRLS_RESOURCES) + value);
+    this->setImageFromSVGFile(BRLS_ASSET(value));
 #endif
 }
 

@@ -4,7 +4,7 @@ set(BOREALIS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis)
 set(BOREALIS_LIBRARY ${BOREALIS_DIR}/library)
 
 # Include Platform common options
-# wiliwili only support PLATFORM_DESKTOP and PLATFORM_SWITCH
+# wiliwili supports desktop, Switch, and the Xbox 360/XDK bring-up path
 # example: cmake -B build -DPLATFORM_DESKTOP=ON
 include(${BOREALIS_LIBRARY}/cmake/commonOption.cmake)
 
@@ -98,8 +98,13 @@ set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/resources)
 set(APP_VERSION "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_REVISION}")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 
-find_package(Threads REQUIRED)
-list(APPEND APP_PLATFORM_LIB ${CMAKE_THREAD_LIBS_INIT})
+if (PLATFORM_XBOX360)
+    # OXDK supplies thread primitives through the XDK/runtime; there is no
+    # host pthreads archive to pass to oxdklink.
+else ()
+    find_package(Threads REQUIRED)
+    list(APPEND APP_PLATFORM_LIB ${CMAKE_THREAD_LIBS_INIT})
+endif ()
 
 # Find libmpv and libwebp
 if (MAC_DOWNLOAD_DYLIB)
@@ -125,6 +130,46 @@ elseif (PLATFORM_DESKTOP)
     if (MINGW)
         set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++ -static" CACHE STRING "" FORCE)
     endif ()
+elseif (PLATFORM_XBOX360)
+    # Xbox 360 uses the planned FFmpeg/custom transport path. Do not probe
+    # desktop libmpv or pkg-config; XDK libraries are supplied by the toolchain.
+    message(STATUS "Xbox 360 build: skipping libmpv/pkg-config dependency probing")
+    # CPR headers remain part of the public HTTP API while its implementation
+    # is supplied by the later bili360 transport slice.
+    # curl/mbedtls are vendored from bili360-main into third_party/; the
+    # BILI360_DIR environment variable is kept as a fallback for checkouts
+    # where third_party/ has not been populated.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/curl/include/curl/curl.h")
+        set(XBOX360_CURL_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/curl/include")
+    else ()
+        set(XBOX360_CURL_INCLUDE "$ENV{BILI360_DIR}/third_party/curl/include")
+    endif ()
+    list(APPEND APP_PLATFORM_INCLUDE
+        ${CMAKE_CURRENT_SOURCE_DIR}/library/cpr/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/library/cmake/xbox360-cshim
+        ${XBOX360_CURL_INCLUDE})
+    set(XBOX360_LIBCXX_ARCHIVE "${CMAKE_BINARY_DIR}/libcxx-xenon.a")
+    list(APPEND APP_PLATFORM_LIB "${XBOX360_LIBCXX_ARCHIVE}" xbox360_platform_shims)
+    # Xenon CRT gaps (C99 float/string helpers, MSVC intrinsics) and the console
+    # stubs for symbols only the desktop CRT defines. See the source for why each
+    # one is needed; nothing here stands in for a missing feature.
+    add_library(xbox360_platform_shims STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/platform/xbox360/xbox360_crt_shims.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/platform/xbox360/xbox360_filesystem.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/platform/xbox360/xbox360_m3_shims.cpp)
+    target_include_directories(xbox360_platform_shims PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/library/cpr/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/library/cmake/xbox360-cshim
+        ${XBOX360_CURL_INCLUDE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/include)
+    # libc++'s compiled half (iostreams, locale, streambuf, stdexcept) has no prebuilt
+    # library for Xenon; OXDK builds one from libc++'s own sources when
+    # OXDK360_LIBCXX_LIB=1 and scripts/build_xbox360_libcxx.sh mirrors that setup.
+    add_custom_target(xbox360_libcxx
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_xbox360_libcxx.sh"
+        BYPRODUCTS "${XBOX360_LIBCXX_ARCHIVE}"
+        COMMENT "Building OXDK libc++ (libcxx-xenon.a) for Xenon"
+        VERBATIM)
 elseif (APP_PLATFORM_CUSTOM_LIBS)
     message(STATUS "Using custom libraries for mpv and webp")
     # If you want to manually specify dependencies:
@@ -185,6 +230,17 @@ endif ()
 
 # source cpp
 file(GLOB_RECURSE MAIN_SRC wiliwili/source/*.cpp)
+if (PLATFORM_XBOX360)
+    # libmpv is not part of the OXDK build yet.  Keep the public MPVCore API
+    # available through the Xbox stub implementation while excluding the
+    # desktop renderer and DLNA activity from this compile pass.
+    list(REMOVE_ITEM MAIN_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/view/mpv_core.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/activity/dlna_activity.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/api/dlna.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/fragment/player_dlna_search.cpp)
+    list(APPEND MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/view/mpv_core_xbox360.cpp)
+endif ()
 if (WIN32)
     configure_file("${CMAKE_SOURCE_DIR}/wiliwili/app_win32.rc.in" "${CMAKE_BINARY_DIR}/app_win32.rc")
     list(APPEND MAIN_SRC ${CMAKE_BINARY_DIR}/app_win32.rc)
@@ -325,5 +381,14 @@ endif ()
 
 target_include_directories(${PROJECT_NAME} PRIVATE wiliwili/include wiliwili/include/api ${APP_PLATFORM_INCLUDE})
 target_compile_options(${PROJECT_NAME} PRIVATE -ffunction-sections -fdata-sections -Wunused-variable ${APP_PLATFORM_OPTION})
-target_link_libraries(${PROJECT_NAME} PRIVATE wiliwiliLibExtra borealis lunasvg pystring pdr mongoose z ${APP_PLATFORM_LIB})
+if (PLATFORM_XBOX360)
+    set(WILIWILI_ZLIB xbox360_zlib)
+else ()
+    set(WILIWILI_ZLIB z)
+endif ()
+target_link_libraries(${PROJECT_NAME} PRIVATE wiliwiliLibExtra borealis lunasvg pystring pdr mongoose ${WILIWILI_ZLIB} ${APP_PLATFORM_LIB})
+if (PLATFORM_XBOX360)
+    target_link_libraries(${PROJECT_NAME} PRIVATE xbox360_runtime)
+    add_dependencies(${PROJECT_NAME} xbox360_libcxx)
+endif ()
 target_link_options(${PROJECT_NAME} PRIVATE ${APP_PLATFORM_LINK_OPTION})

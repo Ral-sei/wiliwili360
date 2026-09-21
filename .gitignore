@@ -34,3 +34,6 @@ android-project
 CLAUDE.md
 # Other AI
 AGENT.md
+# Xbox 360 porting: local artifacts
+resources.zip
+__pycache__/

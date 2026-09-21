@@ -2,7 +2,6 @@
 // Created by fang on 2024/1/10.
 //
 
-#include <unistd.h>
 #include <nlohmann/json.hpp>
 #include <borealis/core/singleton.hpp>
 #include <borealis/core/application.hpp>
@@ -144,7 +143,10 @@ std::vector<std::string> ShaderHelper::getProfileList() {
 [[nodiscard]] bool ShaderHelper::isAvailable() const { return !pack.profiles.empty(); }
 
 void ShaderHelper::load() {
-    const std::string path = ProgramConfig::instance().getConfigDir() + "/pack.json";
+#if defined(PLATFORM_XBOX360)
+    return;
+#else
+    const std::string path = ProgramConfig::instance().getConfigDir() + CFG_PATH_SEP "pack.json";
 
     std::ifstream readFile(path);
     if (readFile) {
@@ -161,10 +163,14 @@ void ShaderHelper::load() {
     } else {
         brls::Logger::warning("Cannot find custom shader pack, (Searched at: {})", path);
     }
+#endif
 }
 
 void ShaderHelper::save() {
-    const std::string path = ProgramConfig::instance().getConfigDir() + "/pack.json";
+#if defined(PLATFORM_XBOX360)
+    return;
+#else
+    const std::string path = ProgramConfig::instance().getConfigDir() + CFG_PATH_SEP "pack.json";
     // fs is defined in cpr/cpr.h
 #ifndef IOS
     cpr::fs::create_directories(ProgramConfig::instance().getConfigDir());
@@ -178,4 +184,5 @@ void ShaderHelper::save() {
     writeFile << content.dump(2);
     writeFile.close();
     brls::Logger::info("Write shader pack to: {}", path);
+#endif
 }

@@ -98,6 +98,7 @@ static void dxt_compress(uint8_t *dst, uint8_t *src, uint32_t w, uint32_t h, boo
 }
 #endif
 
+#if !defined(PLATFORM_XBOX360)
 class ImageThreadPool : public cpr::ThreadPool, public brls::Singleton<ImageThreadPool> {
 public:
     ImageThreadPool() : cpr::ThreadPool(1, ImageHelper::REQUEST_THREADS, std::chrono::milliseconds(5000)) {
@@ -114,13 +115,14 @@ public:
 private:
     bilibili::CurlSharedObject share;
 };
+#endif
 
 ImageHelper::ImageHelper(brls::Image* view) : imageView(view) {}
 
 ImageHelper::~ImageHelper() { brls::Logger::verbose("delete ImageHelper {}", (size_t)this); }
 
 std::shared_ptr<ImageHelper> ImageHelper::with(brls::Image* view) {
-    std::lock_guard<std::mutex> lock(requestMutex);
+    brls::PlatformLockGuard lock(requestMutex);
     std::shared_ptr<ImageHelper> item;
 
     if (!requestPool.empty() && (*requestPool.begin())->getImageView() == nullptr) {
@@ -174,6 +176,12 @@ void ImageHelper::load(const std::string &url) {
         return;
     }
 
+#if defined(PLATFORM_XBOX360)
+    // M3 is offline; the Xbox HTTP/image worker arrives with the M4 transport.
+    this->clean();
+    return;
+#else
+
     //todo: 可能会发生同时请求多个重复链接的情况，此种情况下最好合并为一个请求
 
     // 缓存网络图片
@@ -187,6 +195,7 @@ void ImageHelper::load(const std::string &url) {
         }
         this->requestImage();
     });
+#endif
 }
 
 static inline void freeImageData(uint8_t* imageData, bool isWebp) {
@@ -200,6 +209,9 @@ static inline void freeImageData(uint8_t* imageData, bool isWebp) {
 }
 
 void ImageHelper::requestImage() {
+#if defined(PLATFORM_XBOX360)
+    this->clean();
+#else
     brls::Logger::verbose("request Image 2: {} {}", this->imageUrl, this->isCancel);
 
     // 请求图片
@@ -293,10 +305,11 @@ void ImageHelper::requestImage() {
         }
         this->clean();
     });
+#endif
 }
 
 void ImageHelper::clean() {
-    std::lock_guard<std::mutex> lock(requestMutex);
+    brls::PlatformLockGuard lock(requestMutex);
 
     // 允许图片组件销毁
     if (this->imageView) this->imageView->ptrUnlock();
@@ -310,7 +323,7 @@ void ImageHelper::clear(brls::Image* view) {
     brls::TextureCache::instance().removeCache(view->getTexture());
     view->clear();
 
-    std::lock_guard<std::mutex> lock(requestMutex);
+    brls::PlatformLockGuard lock(requestMutex);
 
     // 请求不存在
     if (requestMap.find(view) == requestMap.end()) return;
@@ -331,8 +344,10 @@ void ImageHelper::cancel() {
 
 void ImageHelper::setRequestThreads(size_t num) {
     REQUEST_THREADS                            = num;
+#if !defined(PLATFORM_XBOX360)
     ImageThreadPool::instance().min_thread_num = 1;
     ImageThreadPool::instance().max_thread_num = num;
+#endif
 }
 
 void ImageHelper::setImageView(brls::Image* view) { this->imageView = view; }

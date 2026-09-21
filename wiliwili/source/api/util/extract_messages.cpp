@@ -73,6 +73,7 @@ std::vector<std::shared_ptr<message::LiveMessage>> extract_messages(const std::v
     for (const auto& message : messages) {
         nlohmann::json json_message;
 
+#if defined(__cpp_exceptions)
         try {
             json_message = nlohmann::json::parse(message);
         } catch (const std::exception& e) {
@@ -80,6 +81,11 @@ std::vector<std::shared_ptr<message::LiveMessage>> extract_messages(const std::v
         } catch (...) {
             continue;
         }
+#else
+        json_message = nlohmann::json::parse(message, nullptr, false);
+        if (json_message.is_discarded())
+            continue;
+#endif
 
         auto it = json_message.find("cmd");
         if (it == json_message.end()) continue;

@@ -24,7 +24,7 @@ public:
     
     // 获取表情图片，如果不在缓存中则创建并加载
     RichTextImage* getEmoticon(const std::string& name, const std::string& url, float size) {
-        std::lock_guard<std::mutex> lock(cache_mutex);
+        brls::PlatformLockGuard lock(cache_mutex);
         
         // 检查是否在缓存中
         auto it = emoticon_map.find(name);
@@ -79,7 +79,7 @@ public:
     
     // 清空缓存
     void clear() {
-        std::lock_guard<std::mutex> lock(cache_mutex);
+        brls::PlatformLockGuard lock(cache_mutex);
         
         // 释放所有图片资源
         for (auto& pair : emoticon_map) {
@@ -98,7 +98,7 @@ private:
     
     static constexpr size_t MAX_CACHE_SIZE = 50;
     
-    std::mutex cache_mutex;
+    brls::PlatformMutex cache_mutex;
     std::unordered_map<std::string, std::unique_ptr<RichTextImage>> emoticon_map;
     std::list<std::string> lru_list; // 用于LRU策略
 };
@@ -151,7 +151,7 @@ void LiveDanmakuCore::reset() {
     this->center_lines.clear();
     this->now.clear();
     {
-        std::lock_guard<std::mutex> lock(this->next_mutex);
+        brls::PlatformLockGuard lock(this->next_mutex);
         this->next.clear();
     }
     // 清空表情包
@@ -216,7 +216,7 @@ void LiveDanmakuCore::add(const std::vector<LiveDanmakuItem> &dan_l) {
     
     // 加锁保护 next 队列，使用RAII方式管理锁
     {
-        std::lock_guard<std::mutex> lock(this->next_mutex);
+        brls::PlatformLockGuard lock(this->next_mutex);
         
         // 检查队列容量，如果队列过长则先清理一部分
         if (this->next.size() + filtered_danmakus.size() > 200) {
@@ -375,7 +375,7 @@ void LiveDanmakuCore::draw(NVGcontext *vg, float x, float y, float width, float 
     
     size_t _time = 0;
     {
-        std::lock_guard<std::mutex> lock(this->next_mutex);
+        brls::PlatformLockGuard lock(this->next_mutex);
         while (!this->next.empty() && init_danmaku(vg, this->next.front(), width, LINES, SECOND, _now, _time)) {
             const auto &i = next.front();
             if (this->now.find(i.danmaku->dan_color) == this->now.end())
@@ -410,7 +410,9 @@ void LiveDanmakuCore::draw(NVGcontext *vg, float x, float y, float width, float 
             float dx, dy;
             dx = dy = DanmakuCore::DANMAKU_STYLE_FONT == DanmakuFontStyle::DANMAKU_FONT_INCLINE;
             nvgFontBlur(vg, DanmakuCore::DANMAKU_STYLE_FONT == DanmakuFontStyle::DANMAKU_FONT_SHADOW);
+#if !defined(PLATFORM_XBOX360)
             nvgFontDilate(vg, DanmakuCore::DANMAKU_STYLE_FONT == DanmakuFontStyle::DANMAKU_FONT_STROKE);
+#endif
 
             nvgFillColor(vg, border_color);
             for (const auto &j : v) {
@@ -433,7 +435,9 @@ void LiveDanmakuCore::draw(NVGcontext *vg, float x, float y, float width, float 
                 }
             }
             nvgFontBlur(vg, 0.0f);
+#if !defined(PLATFORM_XBOX360)
             nvgFontDilate(vg, 0.0f);
+#endif
         }
 
         // 绘制主体

@@ -14,6 +14,12 @@
 #include "borealis/core/singleton.hpp"
 #include "borealis/core/logger.hpp"
 
+#ifdef PLATFORM_XBOX360
+#define CFG_PATH_SEP "\\"
+#else
+#define CFG_PATH_SEP "/"
+#endif
+
 #ifdef PS4
 const std::string primaryDNSStr   = "223.5.5.5";
 const std::string secondaryDNSStr = "1.1.1.1";
@@ -220,12 +226,16 @@ public:
     T getSettingItem(SettingItem item, T defaultValue) {
         auto& key = SETTING_MAP[item].key;
         if (!setting.contains(key)) return defaultValue;
+#if defined(PLATFORM_XBOX360)
+        return this->setting.at(key).get<T>();
+#else
         try {
             return this->setting.at(key).get<T>();
         } catch (const std::exception& e) {
             brls::Logger::error("Damaged config found: {}/{}", key, e.what());
             return defaultValue;
         }
+#endif
     }
 
     template <typename T>

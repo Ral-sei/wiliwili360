@@ -41,7 +41,9 @@ void BilibiliClient::get_login_info(const std::string& oauthKey, const std::func
     HTTP::_cpr_post(
         Api::QrLoginInfo, {}, {{"oauthKey", oauthKey}},
         [callback, error](const cpr::Response& r) {
+#if defined(__cpp_exceptions)
             try {
+#endif
                 nlohmann::json res = nlohmann::json::parse(r.text);
                 auto data          = res.get<QrLoginInfoResult>();
 
@@ -58,11 +60,13 @@ void BilibiliClient::get_login_info(const std::string& oauthKey, const std::func
 
                 if (callback) callback(data.data);
                 return;
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG("API error", -1);
                 printf("data: %s\n", r.text.c_str());
                 printf("ERROR: %s\n", e.what());
             }
+#endif
         },
         error);
 }
@@ -86,7 +90,9 @@ void BilibiliClient::get_login_info_v2(const std::string& qrcodeKey, const std::
     HTTP::_cpr_get(
         Api::QrLoginInfoV2, {{"qrcode_key", qrcodeKey}, {"source", "main_electron_pc"}},
         [callback, error, uuid](const cpr::Response& r) {
+#if defined(__cpp_exceptions)
             try {
+#endif
                 HTTP::COOKIES      = {false};
                 nlohmann::json res = nlohmann::json::parse(r.text);
                 auto data          = res.at("data").get<QrLoginInfoResultV2>();
@@ -109,11 +115,13 @@ void BilibiliClient::get_login_info_v2(const std::string& qrcodeKey, const std::
 
                 if (callback) callback(data.data);
                 return;
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG("API error", -1);
                 printf("data: %s\n", r.text.c_str());
                 printf("ERROR: %s\n", e.what());
             }
+#endif
         },
         error);
 }

@@ -118,12 +118,7 @@ PlayerDanmakuSetting::PlayerDanmakuSetting(bool isLiveMode) {
         liveLevels.emplace_back("wiliwili/player/danmaku/filter/level_live_60"_i18n);
     
     // 获取当前设置值或使用默认值0
-    int liveDanmakuLevel = 0;
-    try {
-        liveDanmakuLevel = LiveDanmakuCore::DANMAKU_FILTER_LEVEL_LIVE;
-    } catch (const std::exception& e) {
-        brls::Logger::error("Error getting live danmaku level: {}", e.what());
-    }
+    int liveDanmakuLevel = LiveDanmakuCore::DANMAKU_FILTER_LEVEL_LIVE;
     
     this->cellLevelLive->init("wiliwili/player/danmaku/filter/level_live"_i18n, liveLevels,
                           liveDanmakuLevel / 5, [](int data) {

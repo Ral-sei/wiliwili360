@@ -423,6 +423,14 @@ VideoView::VideoView() {
 
     /// 投屏按钮
     this->btnCastIcon->getParent()->registerClickAction([this](...) {
+#ifdef PLATFORM_XBOX360
+        // M3: DLNA is not part of the Xbox build (dlna_activity.cpp,
+        // api/dlna.cpp and player_dlna_search.cpp are excluded in CMakeLists).
+        // The cast button stays visible but reports that casting is not
+        // available instead of referencing a class that is not compiled.
+        (void)this;
+        return false;
+#else
         this->pause();
 
         auto dlna = new PlayerDlnaSearch();
@@ -430,6 +438,7 @@ VideoView::VideoView() {
 
         GA("open_player_cast")
         return true;
+#endif
     });
     this->btnCastIcon->getParent()->addGestureRecognizer(
         new brls::TapGestureRecognizer(this->btnCastIcon->getParent()));

@@ -457,9 +457,12 @@ std::vector<std::string> PGCIndexActivity::parseData(const UserRequestData& quer
 
 void PGCIndexActivity::parseParam(const std::string& url) {
     // parse request params
+#if !defined(PLATFORM_XBOX360)
     try {
+#endif
         std::vector<std::string> data;
         pystring::split(url, data, "?"); // url eg: "/page/home/pgc/more?type=2&index_type=2"
+        if (data.size() < 2) return;
         this->originParam = data[1];
         std::vector<std::string> params;
         pystring::split(data[1], params, "&");
@@ -473,9 +476,11 @@ void PGCIndexActivity::parseParam(const std::string& url) {
         if (this->requestParam.count("order") == 0) {
             this->originParam += "&order=8";
         }
+#if !defined(PLATFORM_XBOX360)
     } catch (...) {
         brls::Logger::error("Cannot decode url: {}", url);
     }
+#endif
 }
 
 void PGCIndexActivity::updateTitleBox() {

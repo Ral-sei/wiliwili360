@@ -8,6 +8,7 @@
 #include <ctime>
 #include <random>
 #include <unordered_map>
+#include <borealis/core/xbox360_mutex.hpp>
 #include <borealis/views/image.hpp>
 
 /**
@@ -119,5 +120,5 @@ private:
 
     /// 请求队列，可复用其中的 ImageHelper
     inline static Pool requestPool;
-    inline static std::mutex requestMutex;
+    inline static brls::PlatformMutex requestMutex;
 };

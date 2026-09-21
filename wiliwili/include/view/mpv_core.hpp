@@ -12,9 +12,21 @@
 #include <borealis/core/geometry.hpp>
 #include <borealis/core/singleton.hpp>
 #include <borealis/core/logger.hpp>
+#if defined(PLATFORM_XBOX360)
+struct mpv_handle {};
+struct mpv_render_context {};
+struct mpv_node {};
+enum {
+    MPV_ERROR_UNKNOWN_FORMAT = -11,
+    MPV_ERROR_LOADING_FAILED = -12
+};
+inline const char* mpv_error_string(int) { return "mpv unavailable on Xbox 360"; }
+#else
 #include <mpv/client.h>
 #include <mpv/render.h>
-#if defined(MPV_SW_RENDER)
+#endif
+#if defined(PLATFORM_XBOX360)
+#elif defined(MPV_SW_RENDER)
 #elif defined(BOREALIS_USE_DEKO3D)
 #include <mpv/render_dk3d.h>
 #elif defined(BOREALIS_USE_D3D11)
@@ -402,7 +414,10 @@ private:
     mpv_handle *mpv                 = nullptr;
     mpv_render_context *mpv_context = nullptr;
     brls::Rect rect                 = {0, 0, 1920, 1080};
-#ifdef MPV_SW_RENDER
+#if defined(PLATFORM_XBOX360)
+    // No libmpv is linked on Xbox 360 yet; rendering is supplied by the
+    // platform player integration in a later pass.
+#elif defined(MPV_SW_RENDER)
     const int PIXCEL_SIZE          = 4;
     int nvg_image                  = 0;
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)

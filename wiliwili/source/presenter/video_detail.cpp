@@ -502,11 +502,15 @@ void VideoDetail::requestVideoDanmaku(uint64_t cid) {
                 if (child->Name()[0] != 'd') continue;  // 简易判断是不是弹幕
                 const char* content = child->GetText();
                 if (!content) continue;
+#if defined(__cpp_exceptions)
                 try {
+#endif
                     items.emplace_back(content, child->Attribute("p"));
+#if defined(__cpp_exceptions)
                 } catch (...) {
                     brls::Logger::error("DANMAKU: error decode: {}", child->GetText());
                 }
+#endif
             }
 
             brls::sync([items]() { DanmakuCore::instance().loadDanmakuData(items); });

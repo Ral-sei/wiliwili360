@@ -115,8 +115,16 @@ void Intent::openGallery(const std::vector<std::string>& data) {
 }
 
 void Intent::openDLNA() {
+#ifdef PLATFORM_XBOX360
+    // M3: dlna_activity.cpp is not compiled for Xbox 360, so there is no page
+    // to open. Nothing in the Xbox navigation currently calls this entry point;
+    // the DLNA slice has to be rebuilt against the Xbox network stack first
+    // (see the M4/M6 notes in docs/XBOX360_PORTING_PLAN.md).
+    brls::Application::notify("DLNA is not available on this build");
+#else
     auto activity = new DLNAActivity();
     brls::Application::pushActivity(activity, brls::TransitionAnimation::NONE);
+#endif
 }
 
 void Intent::openActivity(const std::string& id) {

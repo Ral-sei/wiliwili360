@@ -41,7 +41,9 @@ static void to_url(int room_id, std::vector<std::string> &names, std::vector<std
     std::string json_str = r.text;
     brls::Logger::debug("表情API返回: {}", json_str.substr(0, 100) + (json_str.length() > 100 ? "..." : ""));
     
+#if defined(__cpp_exceptions)
     try {
+#endif
         nlohmann::json _json = nlohmann::json::parse(json_str);
         
         if (_json["code"].get<int>() != 0) {
@@ -76,9 +78,11 @@ static void to_url(int room_id, std::vector<std::string> &names, std::vector<std
                 brls::Logger::debug("发现表情: {} -> {}", emoji, url);
             }
         }
+#if defined(__cpp_exceptions)
     } catch (const std::exception& e) {
         brls::Logger::error("解析表情列表失败: {}", e.what());
     }
+#endif
 }
 
 lmp dl_emoticon(int room_id) {

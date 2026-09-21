@@ -5,7 +5,14 @@
 #include "utils/number_helper.hpp"
 #include <pystring.h>
 #include <chrono>
+#include <cstdlib>
+#if defined(PLATFORM_XBOX360)
+#include <xtl.h>
+extern "C" int __stdcall XNetRandom(unsigned char*, unsigned int);
+#else
 #include <random>
+#endif
+#include <vector>
 
 #ifdef _WIN32
 #define GET_TIME                   \
@@ -64,12 +71,30 @@ const char seed[64] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B
                        'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '\0', '\0'};
 
 std::string getRandom(int length, int rangeStart, int rangeEnd) {
+#if defined(PLATFORM_XBOX360)
+    if (length <= 0 || rangeStart > rangeEnd)
+        return {};
+
+    std::vector<BYTE> randomBytes(static_cast<size_t>(length));
+    if (XNetRandom(randomBytes.data(), static_cast<UINT>(randomBytes.size())) != 0) {
+        DWORD state = GetTickCount() ^ static_cast<DWORD>(length);
+        for (auto& byte : randomBytes) {
+            state = state * 1664525u + 1013904223u;
+            byte  = static_cast<BYTE>(state >> 24);
+        }
+    }
+#else
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(rangeStart, rangeEnd);
+#endif
     std::string text;
     for (int n = 0; n < length; ++n) {
+#if defined(PLATFORM_XBOX360)
+        int val = rangeStart + randomBytes[static_cast<size_t>(n)] % (rangeEnd - rangeStart + 1);
+#else
         int val = dis(gen);
+#endif
         text += seed[val];
     }
     return text;
@@ -100,13 +125,13 @@ std::string wiliwili::uglyString2Time(const std::string& str) {
     if(str.empty()) return "";
     auto res = pystring::split(str, ":");
     if (res.size() != 2) return str;
-    try {
-        int min = std::stoi(res[0]);
-        int sec = std::stoi(res[1]);
-        return wiliwili::sec2Time(min * 60 + sec);
-    } catch (...) {
+    char* minEnd = nullptr;
+    char* secEnd = nullptr;
+    long min     = std::strtol(res[0].c_str(), &minEnd, 10);
+    long sec     = std::strtol(res[1].c_str(), &secEnd, 10);
+    if (minEnd == res[0].c_str() || *minEnd != '\0' || secEnd == res[1].c_str() || *secEnd != '\0')
         return str;
-    }
+    return wiliwili::sec2Time(static_cast<size_t>(min * 60 + sec));
 }
 
 std::string wiliwili::sec2TimeDLNA(size_t t) {

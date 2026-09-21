@@ -1,3 +1,14 @@
+<h1 align="center">Wiliwili Xbox 360 移植版</h1>
+
+🚧施工中
+
+使用 [OXDK](https://github.com/MrMilenko/OXDK) 编译
+
+---
+
+# 原 README
+
+
 <p align="center">
     <img src="resources/svg/cn.xfangfang.wiliwili.svg" alt="logo" height="128" width="128"/>
 </p>

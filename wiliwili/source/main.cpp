@@ -56,7 +56,14 @@ int main(int argc, char* argv[]) {
     brls::Application::getPlatform()->disableScreenDimming(false);
 
     if (brls::Application::getPlatform()->isApplicationMode()) {
+#if defined(PLATFORM_XBOX360) || defined(__XBOX360__)
+        // Keep the first Xbox 360 vertical slice offline and deterministic.
+        // HintActivity exercises XML inflation, images, focus navigation and
+        // the GalleryView without requiring the unfinished API/player layers.
+        Intent::openHint();
+#else
         Intent::openMain();
+#endif
         // Uncomment these lines to debug activities
         //        Intent::openBV("BV1Da411Y7U4");  // 弹幕防遮挡 (横屏)
         //        Intent::openBV("BV1iN4y1m7J3");  // 弹幕防遮挡 (竖屏)
@@ -88,10 +95,12 @@ int main(int argc, char* argv[]) {
         Intent::openHint();
     }
 
+#if !defined(PLATFORM_XBOX360) && !defined(__XBOX360__)
     GA("open_app", {{"version", APPVersion::instance().getVersionStr()},
                     {"language", brls::Application::getLocale()},
                     {"window", fmt::format("{}x{}", brls::Application::windowWidth, brls::Application::windowHeight)}})
     APPVersion::instance().checkUpdate();
+#endif
 
     // Run the app
     // brls::Application::setLimitedFPS(60);

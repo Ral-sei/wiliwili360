@@ -4,10 +4,10 @@
 
 #ifdef IOS
 #include <CoreFoundation/CoreFoundation.h>
-#elif defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+#elif defined(__APPLE__) || defined(__linux__) || (defined(_WIN32) && !defined(PLATFORM_XBOX360))
 #include <unistd.h>
 #include <borealis/platforms/desktop/desktop_platform.hpp>
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(PLATFORM_XBOX360)
 #include <shlobj.h>
 #endif
 #endif
@@ -69,13 +69,25 @@ unsigned int sceLibcHeapSize             = 24 * 1024 * 1024;
 }
 #endif
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(PLATFORM_XBOX360)
 #include <winsock2.h>
 #endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 256
 #endif
+
+static bool configFileExists(const std::string& path) {
+#if defined(PLATFORM_XBOX360)
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (!file)
+        return false;
+    std::fclose(file);
+    return true;
+#else
+    return access(path.c_str(), F_OK) != -1;
+#endif
+}
 
 #ifdef __PSV__
 #ifdef BOREALIS_USE_GXM
@@ -481,10 +493,11 @@ void ProgramConfig::saveHomeWindowState() {
 }
 
 void ProgramConfig::load() {
-    const std::string path = this->getConfigDir() + "/wiliwili_config.json";
+    const std::string path = this->getConfigDir() + CFG_PATH_SEP "wiliwili_config.json";
 
     std::ifstream readFile(path);
     if (readFile) {
+#if defined(__cpp_exceptions)
         try {
             nlohmann::json content;
             readFile >> content;
@@ -493,11 +506,20 @@ void ProgramConfig::load() {
         } catch (const std::exception& e) {
             brls::Logger::error("ProgramConfig::load: {}", e.what());
         }
+#else
+        nlohmann::json content = nlohmann::json::parse(readFile, nullptr, false);
+        readFile.close();
+        if (!content.is_discarded())
+            this->setProgramConfig(content.get<ProgramConfig>());
+        else
+            brls::Logger::error("ProgramConfig::load: invalid JSON");
+#endif
         brls::Logger::info("Load config from: {}", path);
     }
 
     // 初始化代理
     // 默认加载环境变量
+#if !defined(PLATFORM_XBOX360)
     const char* http_proxy  = getenv("http_proxy");
     const char* https_proxy = getenv("https_proxy");
     if (http_proxy) {
@@ -508,6 +530,7 @@ void ProgramConfig::load() {
         this->httpsProxy = https_proxy;
         brls::Logger::info("Load https proxy from env: {}", this->httpsProxy);
     }
+#endif
     // 如果设置开启了自定义代理，则读取配置文件中的代理设置
     if (getBoolOption(SettingItem::HTTP_PROXY_STATUS)) {
         this->httpProxy  = getSettingItem(SettingItem::HTTP_PROXY, this->httpProxy);
@@ -516,8 +539,8 @@ void ProgramConfig::load() {
 
     // 初始化自定义手柄按键映射
 #ifdef IOS
-#elif defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
-    brls::DesktopPlatform::GAMEPAD_DB = getConfigDir() + "/gamecontrollerdb.txt";
+#elif defined(__APPLE__) || defined(__linux__) || (defined(_WIN32) && !defined(PLATFORM_XBOX360))
+    brls::DesktopPlatform::GAMEPAD_DB = getConfigDir() + CFG_PATH_SEP "gamecontrollerdb.txt";
 #endif
 
     // 初始化自定义布局
@@ -692,7 +715,7 @@ void ProgramConfig::load() {
 #endif
     }
 #ifdef IOS
-#elif defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+#elif defined(__APPLE__) || defined(__linux__) || (defined(_WIN32) && !defined(PLATFORM_XBOX360))
     // 初始化上一次窗口位置
     loadHomeWindowState();
 #endif
@@ -757,9 +780,9 @@ void ProgramConfig::load() {
         }
 
         // 初始化弹幕字体
-        std::string danmakuFont = getConfigDir() + "/danmaku.ttf";
+        std::string danmakuFont = getConfigDir() + CFG_PATH_SEP "danmaku.ttf";
         // 只在应用模式下加载自定义字体 减少switch上的内存占用
-        if (brls::Application::getPlatform()->isApplicationMode() && access(danmakuFont.c_str(), F_OK) != -1 &&
+        if (brls::Application::getPlatform()->isApplicationMode() && configFileExists(danmakuFont) &&
             brls::Application::loadFontFromFile("danmaku", danmakuFont)) {
             // 自定义弹幕字体
             int danmakuFontId = brls::Application::getFont("danmaku");
@@ -791,7 +814,7 @@ void ProgramConfig::load() {
 
         // 设置窗口最小尺寸
 #ifdef IOS
-#elif defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+#elif defined(__APPLE__) || defined(__linux__) || (defined(_WIN32) && !defined(PLATFORM_XBOX360))
         int minWidth  = getIntOption(SettingItem::MINIMUM_WINDOW_WIDTH);
         int minHeight = getIntOption(SettingItem::MINIMUM_WINDOW_HEIGHT);
         brls::Application::getPlatform()->setWindowSizeLimits(minWidth, minHeight, 0, 0);
@@ -822,7 +845,7 @@ void ProgramConfig::load() {
     });
 
 #ifdef IOS
-#elif defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+#elif defined(__APPLE__) || defined(__linux__) || (defined(_WIN32) && !defined(PLATFORM_XBOX360))
     // 窗口将要关闭时, 保存窗口状态配置
     brls::Application::getExitEvent()->subscribe([this]() { saveHomeWindowState(); });
 #endif
@@ -838,15 +861,10 @@ ProgramOption ProgramConfig::getOptionData(SettingItem item) { return SETTING_MA
 
 size_t ProgramConfig::getIntOptionIndex(SettingItem item) {
     auto optionData = getOptionData(item);
-    if (setting.contains(optionData.key)) {
-        try {
-            int option = this->setting.at(optionData.key).get<int>();
-            for (size_t i = 0; i < optionData.rawOptionList.size(); i++) {
-                if (optionData.rawOptionList[i] == option) return i;
-            }
-        } catch (const std::exception& e) {
-            brls::Logger::error("Damaged config found: {}/{}", optionData.key, e.what());
-            return optionData.defaultOption;
+    if (setting.contains(optionData.key) && setting.at(optionData.key).is_number_integer()) {
+        int option = this->setting.at(optionData.key).get<int>();
+        for (size_t i = 0; i < optionData.rawOptionList.size(); i++) {
+            if (optionData.rawOptionList[i] == option) return i;
         }
     }
     return optionData.defaultOption;
@@ -854,16 +872,8 @@ size_t ProgramConfig::getIntOptionIndex(SettingItem item) {
 
 int ProgramConfig::getIntOption(SettingItem item) {
     auto optionData = getOptionData(item);
-    if (setting.contains(optionData.key)) {
-        try {
-            return this->setting.at(optionData.key).get<int>();
-        } catch (const std::exception& e) {
-            brls::Logger::error("Damaged config found: {}/{}", optionData.key, e.what());
-            if (!optionData.rawOptionList.empty())
-                return optionData.rawOptionList[optionData.defaultOption];
-            return 0;
-        }
-    }
+    if (setting.contains(optionData.key) && setting.at(optionData.key).is_number_integer())
+        return this->setting.at(optionData.key).get<int>();
     if (!optionData.rawOptionList.empty())
         return optionData.rawOptionList[optionData.defaultOption];
     return 0;
@@ -871,34 +881,23 @@ int ProgramConfig::getIntOption(SettingItem item) {
 
 bool ProgramConfig::getBoolOption(SettingItem item) {
     auto optionData = getOptionData(item);
-    if (setting.contains(optionData.key)) {
-        try {
-            return this->setting.at(optionData.key).get<bool>();
-        } catch (const std::exception& e) {
-            brls::Logger::error("Damaged config found: {}/{}", optionData.key, e.what());
-            return optionData.defaultOption;
-        }
-    }
+    if (setting.contains(optionData.key) && setting.at(optionData.key).is_boolean())
+        return this->setting.at(optionData.key).get<bool>();
     return optionData.defaultOption;
 }
 
 int ProgramConfig::getStringOptionIndex(SettingItem item) {
     auto optionData = getOptionData(item);
-    if (setting.contains(optionData.key)) {
-        try {
-            std::string option = this->setting.at(optionData.key).get<std::string>();
-            for (size_t i = 0; i < optionData.optionList.size(); ++i)
-                if (optionData.optionList[i] == option) return i;
-        } catch (const std::exception& e) {
-            brls::Logger::error("Damaged config found: {}/{}", optionData.key, e.what());
-            return optionData.defaultOption;
-        }
+    if (setting.contains(optionData.key) && setting.at(optionData.key).is_string()) {
+        std::string option = this->setting.at(optionData.key).get<std::string>();
+        for (size_t i = 0; i < optionData.optionList.size(); ++i)
+            if (optionData.optionList[i] == option) return i;
     }
     return optionData.defaultOption;
 }
 
 void ProgramConfig::save() {
-    const std::string path = this->getConfigDir() + "/wiliwili_config.json";
+    const std::string path = this->getConfigDir() + CFG_PATH_SEP "wiliwili_config.json";
     // fs is defined in cpr/cpr.h
 #ifndef IOS
     cpr::fs::create_directories(this->getConfigDir());
@@ -1024,6 +1023,7 @@ void ProgramConfig::init() {
     brls::Application::getWindowSizeChangedEvent()->subscribe([]() { ProgramConfig::instance().checkOnTop(); });
 
     // Set min_threads and max_threads of http thread pool
+#if !defined(PLATFORM_XBOX360)
 #ifdef BOREALIS_USE_GXM
     // TODO: 不确定为什么 gles 版无法使用 libheap, 当 gxm 稳定后会移除 gles 版本，所以暂时忽略
     mbedtls_platform_set_calloc_free(sce_calloc, sce_free);
@@ -1032,8 +1032,9 @@ void ProgramConfig::init() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
     cpr::async::startup(THREAD_POOL_MIN_THREAD_NUM, THREAD_POOL_MAX_THREAD_NUM, std::chrono::milliseconds(5000));
+#endif
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(PLATFORM_XBOX360)
     WSADATA wsaData;
     int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (result != 0) brls::Logger::error("WSAStartup failed with error: {}", result);
@@ -1056,7 +1057,7 @@ void ProgramConfig::init() {
     ps4_mpv_dump_shaders            = 0;
     // 在加载第一帧之后隐藏启动画面
     brls::sync([]() { sceSystemServiceHideSplashScreen(); });
-#else
+#elif !defined(PLATFORM_XBOX360)
     char cwd[PATH_MAX];
     if (getcwd(cwd, sizeof(cwd)) != nullptr) {
         brls::Logger::info("Current working directory: {}", cwd);
@@ -1070,10 +1071,10 @@ void ProgramConfig::init() {
     this->load();
 
     // init custom font path
-    brls::FontLoader::USER_FONT_PATH = getConfigDir() + "/font.ttf";
-    brls::FontLoader::USER_ICON_PATH = getConfigDir() + "/icon.ttf";
+    brls::FontLoader::USER_FONT_PATH = getConfigDir() + CFG_PATH_SEP "font.ttf";
+    brls::FontLoader::USER_ICON_PATH = getConfigDir() + CFG_PATH_SEP "icon.ttf";
 
-    if (access(brls::FontLoader::USER_ICON_PATH.c_str(), F_OK) == -1) {
+    if (!configFileExists(brls::FontLoader::USER_ICON_PATH)) {
         // 自定义字体不存在，使用内置字体
 #if defined(__PSV__) || defined(PS4)
         brls::FontLoader::USER_ICON_PATH = BRLS_ASSET("font/keymap_ps.ttf");
@@ -1094,8 +1095,8 @@ void ProgramConfig::init() {
 #endif
     }
 
-    brls::FontLoader::USER_EMOJI_PATH = getConfigDir() + "/emoji.ttf";
-    if (access(brls::FontLoader::USER_EMOJI_PATH.c_str(), F_OK) == -1) {
+    brls::FontLoader::USER_EMOJI_PATH = getConfigDir() + CFG_PATH_SEP "emoji.ttf";
+    if (!configFileExists(brls::FontLoader::USER_EMOJI_PATH)) {
         // 自定义emoji不存在，使用内置emoji
         brls::FontLoader::USER_EMOJI_PATH = BRLS_ASSET("font/emoji.ttf");
     }
@@ -1121,6 +1122,8 @@ void ProgramConfig::init() {
 std::string ProgramConfig::getHomePath() {
 #if defined(__SWITCH__)
     return "/";
+#elif defined(PLATFORM_XBOX360)
+    return "game:\\";
 #elif defined(_WIN32)
     return std::string(getenv("HOMEPATH"));
 #else
@@ -1131,6 +1134,8 @@ std::string ProgramConfig::getHomePath() {
 std::string ProgramConfig::getConfigDir() {
 #ifdef __SWITCH__
     return "/config/wiliwili";
+#elif defined(PLATFORM_XBOX360)
+    return "game:\\config\\wiliwili";
 #elif defined(PS4)
     return "/data/wiliwili";
 #elif defined(__PSV__)
@@ -1177,16 +1182,18 @@ std::string ProgramConfig::getConfigDir() {
 }
 
 void ProgramConfig::exit(char* argv[]) {
+#if !defined(PLATFORM_XBOX360)
     cpr::async::cleanup();
     curl_global_cleanup();
+#endif
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(PLATFORM_XBOX360)
     WSACleanup();
 #endif
 #ifdef IOS
 #elif defined(PS4)
 #elif __PSV__
-#elif defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+#elif defined(__APPLE__) || defined(__linux__) || (defined(_WIN32) && !defined(PLATFORM_XBOX360))
     if (!brls::DesktopPlatform::RESTART_APP) return;
 #ifdef __linux__
     char filePath[PATH_MAX + 1];
@@ -1207,10 +1214,13 @@ void ProgramConfig::exit(char* argv[]) {
 
 void ProgramConfig::loadCustomThemes() {
     customThemes.clear();
-    std::string directoryPath = getConfigDir() + "/theme";
+#if defined(PLATFORM_XBOX360)
+    return;
+#else
+    std::string directoryPath = getConfigDir() + CFG_PATH_SEP "theme";
     if (!cpr::fs::exists(directoryPath)) return;
 
-    for (const auto& entry : cpr::fs::directory_iterator(getConfigDir() + "/theme")) {
+    for (const auto& entry : cpr::fs::directory_iterator(getConfigDir() + CFG_PATH_SEP "theme")) {
         if (!cpr::fs::is_directory(entry)) continue;
         std::string subDirectory = entry.path().string();
         std::string jsonFilePath = subDirectory + "/resources_meta.json";
@@ -1218,7 +1228,9 @@ void ProgramConfig::loadCustomThemes() {
 
         std::ifstream readFile(jsonFilePath);
         if (readFile) {
+#if defined(__cpp_exceptions)
             try {
+#endif
                 nlohmann::json content;
                 readFile >> content;
                 readFile.close();
@@ -1228,12 +1240,15 @@ void ProgramConfig::loadCustomThemes() {
                 content.get_to(customTheme);
                 customThemes.emplace_back(customTheme);
                 brls::Logger::info("Load custom theme \"{}\" from: {}", customTheme.name, jsonFilePath);
+#if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 brls::Logger::error("CustomTheme::load: {}", e.what());
                 continue;
             }
+#endif
         }
     }
+#endif
 }
 
 std::vector<CustomTheme> ProgramConfig::getCustomThemes() { return customThemes; }

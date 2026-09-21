@@ -4,7 +4,10 @@
 
 #pragma once
 
-#ifdef __SWITCH__
+#if defined(PLATFORM_XBOX360)
+#define THREAD_POOL_MIN_THREAD_NUM 1
+#define THREAD_POOL_MAX_THREAD_NUM 1
+#elif defined(__SWITCH__)
 #define THREAD_POOL_MIN_THREAD_NUM 1
 #define THREAD_POOL_MAX_THREAD_NUM 4
 #elif defined(__PSV__)

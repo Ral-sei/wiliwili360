@@ -18,11 +18,15 @@ SearchHots::SearchHots() {
 
     this->registerFloatXMLAttribute("spanCount", [this](float value) { this->recyclingGrid->spanCount = (int)value; });
 
+#if defined(__cpp_exceptions)
     try {
+#endif
         this->requestSearch();
+#if defined(__cpp_exceptions)
     } catch (brls::ViewNotFoundException const &exception) {
         brls::Logger::error("ViewNotFoundException: {}", exception.what());
     }
+#endif
 }
 
 brls::View *SearchHots::create() { return new SearchHots(); }

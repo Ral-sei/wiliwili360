@@ -1,9 +1,9 @@
 [submodule "library/borealis"]
 	path = library/borealis
-	url = https://github.com/xfangfang/borealis.git
+	url = https://github.com/Ral-sei/borealis.git
 [submodule "library/QR-Code-generator"]
 	path = library/QR-Code-generator
-	url = https://github.com/nayuki/QR-Code-generator.git
+	url = https://github.com/Ral-sei/QR-Code-generator.git
 [submodule "library/pystring"]
 	path = library/pystring
 	url = https://github.com/imageworks/pystring.git
@@ -15,13 +15,13 @@
 	url = https://github.com/sammycage/lunasvg.git
 [submodule "library/cpr"]
 	path = library/cpr
-	url = https://github.com/xfangfang/cpr.git
+	url = https://github.com/Ral-sei/cpr.git
 [submodule "library/mongoose"]
 	path = library/mongoose
-	url = https://github.com/xfangfang/mongoose.git
+	url = https://github.com/Ral-sei/mongoose.git
 [submodule "library/libpdr"]
 	path = library/libpdr
-	url = https://github.com/xfangfang/libpdr.git
+	url = https://github.com/Ral-sei/libpdr.git
 [submodule "library/MemoryModule"]
 	path = library/MemoryModule
 	url = https://github.com/xfangfang/MemoryModule.git

@@ -14,6 +14,27 @@ VideoProfile::VideoProfile() {
 }
 
 void VideoProfile::update() {
+#if defined(PLATFORM_XBOX360)
+    // M3 has no libmpv backend. Keep the diagnostics view valid without
+    // pretending that the Xbox player exposes mpv_node state.
+    constexpr const char *unavailable = "Unavailable";
+    labelUrl->setText(unavailable);
+    labelSize->setText(unavailable);
+    labelFormat->setText(unavailable);
+    labelCache->setText(unavailable);
+    labelVideoRes->setText(unavailable);
+    labelVideoCodec->setText(unavailable);
+    labelVideoPixel->setText(unavailable);
+    labelVideoHW->setText(unavailable);
+    labelVideoBitrate->setText(unavailable);
+    labelVideoDrop->setText(unavailable);
+    labelVideoSync->setText(unavailable);
+    labelAudioChannel->setText(unavailable);
+    labelAudioCodec->setText(unavailable);
+    labelAudioSampleRate->setText(unavailable);
+    labelAudioBitrate->setText(unavailable);
+    return;
+#else
     auto mpvCore = &MPVCore::instance();
 
     // file
@@ -51,6 +72,7 @@ void VideoProfile::update() {
     labelAudioChannel->setText(mpvCore->getString("audio-params/channel-count"));
     labelAudioSampleRate->setText(std::to_string(mpvCore->getInt("audio-params/samplerate") / 1000) + "kHz");
     labelAudioBitrate->setText(std::to_string(mpvCore->getInt("audio-bitrate") / 1024) + "kbps");
+#endif
 }
 
 void VideoProfile::draw(NVGcontext *vg, float x, float y, float width, float height, brls::Style style,

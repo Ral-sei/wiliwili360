@@ -3,6 +3,7 @@
 //
 
 #include <pystring.h>
+#include <cstdlib>
 #include <regex>
 #include <borealis/core/application.hpp>
 #include <borealis/views/rectangle.hpp>
@@ -35,15 +36,20 @@ static inline size_t getHeaderSize(const std::string& text) {
 
 static inline bool isImage(const std::string& text) { return pystring::startswith(pystring::lstrip(text), "!["); }
 
-#define PARSE_IMAGE_DATA(index, name, def)               \
-    if (data.size() > (index) && !data[index].empty()) { \
-        try {                                            \
-            (name) = std::stoi(data[index]);             \
-        } catch (const std::invalid_argument& e) {       \
-            (name) = def;                                \
-        }                                                \
-    } else {                                             \
-        (name) = def;                                    \
+static int parseImageNumber(const std::string& value, int fallback) {
+    if (value.empty())
+        return fallback;
+
+    char* end  = nullptr;
+    long parsed = std::strtol(value.c_str(), &end, 10);
+    return end != value.c_str() && *end == '\0' ? static_cast<int>(parsed) : fallback;
+}
+
+#define PARSE_IMAGE_DATA(index, name, def)                           \
+    if (data.size() > (index)) {                                     \
+        (name) = parseImageNumber(data[index], def);                  \
+    } else {                                                         \
+        (name) = def;                                                \
     }
 static inline std::string getImageUrl(const std::string& test, int& maxHeight, int& margin) {
     std::regex re(R"(\!\[(.*)\]\((.*)\))");

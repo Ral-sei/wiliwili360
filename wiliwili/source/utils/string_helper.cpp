@@ -49,9 +49,8 @@ std::string decompressGzipData(const std::string &compressedData) {
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
 
-    if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) {
-        throw(std::runtime_error("inflateInit failed while decompressing."));
-    }
+    if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK)
+        return {};
 
     zs.next_in  = (Bytef *)compressedData.data();
     zs.avail_in = compressedData.size();
@@ -74,9 +73,8 @@ std::string decompressGzipData(const std::string &compressedData) {
 
     inflateEnd(&zs);
 
-    if (ret != Z_STREAM_END) {
-        throw(std::runtime_error(fmt::format("Exception during zlib decompression: ({}) {}", ret, zs.msg)));
-    }
+    if (ret != Z_STREAM_END)
+        return {};
 
     return decompressedData;
 }
@@ -98,15 +96,14 @@ bool parseHexColor(const std::string& hex, uint8_t& r, uint8_t& g, uint8_t& b) {
     // Accept both "RRGGBB" (6 chars) and "#RRGGBB" (7 chars with leading #)
     const std::string& digits = (hex.size() == 7 && hex[0] == '#') ? hex.substr(1) : hex;
     if (digits.size() != 6) return false;
-    try {
-        uint32_t value = std::stoul(digits, nullptr, 16);
-        r = (value >> 16) & 0xFF;
-        g = (value >> 8) & 0xFF;
-        b = value & 0xFF;
-        return true;
-    } catch (...) {
+    char* end = nullptr;
+    unsigned long value = std::strtoul(digits.c_str(), &end, 16);
+    if (end == digits.c_str() || *end != '\0' || value > 0xFFFFFF)
         return false;
-    }
+    r = (value >> 16) & 0xFF;
+    g = (value >> 8) & 0xFF;
+    b = value & 0xFF;
+    return true;
 }
 
 };  // namespace wiliwili

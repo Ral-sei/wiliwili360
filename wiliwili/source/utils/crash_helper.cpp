@@ -1,7 +1,7 @@
 #include "utils/crash_helper.hpp"
 #include <borealis/core/logger.hpp>
 
-#if defined(_WIN32) && !defined(__WINRT__)
+#if defined(_WIN32) && !defined(__WINRT__) && !defined(PLATFORM_XBOX360)
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

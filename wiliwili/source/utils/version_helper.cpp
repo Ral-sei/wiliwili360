@@ -87,6 +87,9 @@ bool APPVersion::needUpdate(std::string latestVersion) {
 }
 
 void APPVersion::checkUpdate(int delay, bool showUpToDateDialog) {
+#if defined(PLATFORM_XBOX360)
+    return;
+#else
     static bool checking_update = false;
     if (checking_update) return;
     checking_update = true;
@@ -139,4 +142,5 @@ void APPVersion::checkUpdate(int delay, bool showUpToDateDialog) {
             },
             bilibili::HTTP::VERIFY, bilibili::HTTP::PROXIES, cpr::Url{url}, cpr::Timeout{10000});
     });
+#endif
 }

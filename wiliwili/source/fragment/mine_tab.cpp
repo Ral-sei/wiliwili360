@@ -24,6 +24,18 @@
 using namespace brls;
 using namespace brls::literals;
 
+template <typename F>
+static void runBestEffort(F&& function) {
+#if defined(__cpp_exceptions)
+    try {
+        function();
+    } catch (...) {
+    }
+#else
+    function();
+#endif
+}
+
 MineTab::MineTab() {
     this->inflateFromXMLRes("xml/fragment/mine_tab.xml");
     brls::Logger::debug("Fragment MineTab: create");
@@ -32,31 +44,13 @@ MineTab::MineTab() {
         if (status == bilibili::LoginInfo::SUCCESS) {
             brls::Logger::debug("{}", "wiliwili/mine/login/success"_i18n);
             this->requestData();
-            try {
-                this->mineHistory->requestData(true);
-            } catch (...) {
-            }
-            try {
-                this->mineCollection->requestData(true);
-            } catch (...) {
-            }
-            try {
-                this->mineSubscription->requestData(true);
-            } catch (...) {
-            }
-            try {
-                this->mineAnime->requestData(true);
-            } catch (...) {
-            }
-            try {
-                this->mineSeries->requestData(true);
-            } catch (...) {
-            }
-            try {
-                this->mineLater->requestData();
-            } catch (...) {
-            }
-            try {
+            runBestEffort([this]() { this->mineHistory->requestData(true); });
+            runBestEffort([this]() { this->mineCollection->requestData(true); });
+            runBestEffort([this]() { this->mineSubscription->requestData(true); });
+            runBestEffort([this]() { this->mineAnime->requestData(true); });
+            runBestEffort([this]() { this->mineSeries->requestData(true); });
+            runBestEffort([this]() { this->mineLater->requestData(); });
+            runBestEffort([this]() {
                 //动态页刷新
                 auto mainTab = dynamic_cast<AutoTabFrame*>(this->getParent());
                 auto* tab    = (DynamicTab*)mainTab->getTab(1)->getAttachedView();
@@ -70,9 +64,7 @@ MineTab::MineTab() {
                     tab->requestUpList();
                     tab->requestDynamicVideoList(1, "");
                 }
-            } catch (...) {
-                brls::Logger::error("error: cannot refresh activity page");
-            }
+            });
         }
     });
 

@@ -11,6 +11,7 @@
 #include <map>
 #include <cpr/cpr.h>
 #include <pystring.h>
+#include <borealis/core/xbox360_mutex.hpp>
 
 #include "bilibili/util/md5.hpp"
 #include "bilibili/util/http.hpp"
@@ -29,7 +30,7 @@ static std::time_t g_last_update_time = 0;
 
 // 缓存的 mixin_key
 static std::string g_mixin_key;
-static std::mutex g_mixin_key_mutex;
+static brls::PlatformMutex g_mixin_key_mutex;
 
 /**
  * 从URL中提取key
@@ -80,15 +81,20 @@ void updateWbiKeys(const std::function<void()>& success, const ErrorCallback& er
             ERROR_MSG("WBI签名获取失败", -412);
             return;
         }
+#if defined(__cpp_exceptions)
         try {
-            if (nlohmann::json res = nlohmann::json::parse(r.text);
-                res.contains("data") && res["data"].contains("wbi_img")) {
+            nlohmann::json res = nlohmann::json::parse(r.text);
+#else
+        nlohmann::json res = nlohmann::json::parse(r.text, nullptr, false);
+        if (!res.is_discarded()) {
+#endif
+            if (res.contains("data") && res["data"].contains("wbi_img")) {
                 const std::string img_key = extractKeyFromUrl(res["data"]["wbi_img"]["img_url"]);
                 const std::string sub_key = extractKeyFromUrl(res["data"]["wbi_img"]["sub_url"]);
 
                 // 计算并缓存 mixin_key
                 {
-                    std::lock_guard lock(g_mixin_key_mutex);
+                    brls::PlatformLockGuard lock(g_mixin_key_mutex);
                     g_mixin_key        = getMixinKey(img_key, sub_key);
                     g_last_update_time = now;
                 }
@@ -97,8 +103,12 @@ void updateWbiKeys(const std::function<void()>& success, const ErrorCallback& er
                 success();
                 return;
             }
+#if defined(__cpp_exceptions)
         } catch (...) {
         }
+#else
+        }
+#endif
         ERROR_MSG("WBI签名失败", -412);
     });
 }

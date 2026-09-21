@@ -18,7 +18,13 @@
 #include "bilibili.h"
 
 // include ntohl / ntohll
-#ifdef _WIN32
+#if defined(PLATFORM_XBOX360)
+#ifdef ntohl
+#undef ntohl
+#endif
+#define ntohl(value) (value)
+static inline uint64_t ntohll(uint64_t value) { return value; }
+#elif defined(_WIN32)
 #include <winsock2.h>
 #else
 #include <arpa/inet.h>
@@ -30,7 +36,8 @@
 #include <sys/types.h>
 #endif
 #endif
-#ifdef __SWITCH__
+#if defined(PLATFORM_XBOX360)
+#elif defined(__SWITCH__)
 static inline uint64_t ntohll(uint64_t netlonglong) { return __builtin_bswap64(netlonglong); }
 #elif defined(__WINRT__)
 #elif defined(_WIN32_WINNT) && _WIN32_WINNT >= _WIN32_WINNT_WIN8
@@ -199,7 +206,9 @@ void DanmakuItem::draw(NVGcontext *vg, float x, float y, float alpha, bool multi
 
     // background
     if (DanmakuCore::DANMAKU_STYLE_FONT != DanmakuFontStyle::DANMAKU_FONT_PURE) {
+#if !defined(PLATFORM_XBOX360)
         nvgFontDilate(vg, dilate);
+#endif
         nvgFontBlur(vg, blur);
         nvgFillColor(vg, a(borderColor, alpha));
         if (multiLine)
@@ -209,7 +218,9 @@ void DanmakuItem::draw(NVGcontext *vg, float x, float y, float alpha, bool multi
     }
 
     // content
+#if !defined(PLATFORM_XBOX360)
     nvgFontDilate(vg, 0.0f);
+#endif
     nvgFontBlur(vg, 0.0f);
     nvgFillColor(vg, a(color, alpha));
     if (multiLine)
@@ -241,8 +252,8 @@ DanmakuCore::DanmakuCore() {
     auto image2             = romfs::get("pictures/danmaku_highlight.png");
     DANMAKU_IMAGE_HIGHLIGHT = nvgCreateImageMem(vg, 0, (unsigned char *)image2.data(), image2.size());
 #else
-    DANMAKU_IMAGE_OHH       = nvgCreateImage(vg, BRLS_ASSET("pictures/danmaku_ohh.png"), 0);
-    DANMAKU_IMAGE_HIGHLIGHT = nvgCreateImage(vg, BRLS_ASSET("pictures/danmaku_highlight.png"), 0);
+    DANMAKU_IMAGE_OHH       = nvgCreateImage(vg, BRLS_ASSET("pictures/danmaku_ohh.png").c_str(), 0);
+    DANMAKU_IMAGE_HIGHLIGHT = nvgCreateImage(vg, BRLS_ASSET("pictures/danmaku_highlight.png").c_str(), 0);
 #endif
 
     // 退出前清空遮罩纹理
@@ -865,16 +876,9 @@ const MaskSlice &WebMask::getSlice(size_t index) {
             for (size_t i = requestStart; i < requestEnd; i++) {
                 MaskSlice slice = slices[i];
                 // 解压分片数据
-                std::string data;
-                try {
-                    if (slice.offsetEnd == SIZE_T_MAX) slice.offsetEnd = text.size() + offset;
-                    data = wiliwili::decompressGzipData(
-                        text.substr(slice.offsetStart - offset, slice.offsetEnd - slice.offsetStart));
-                } catch (const std::runtime_error &e) {
-                    brls::Logger::error("web mask decompress error: {}", e.what());
-                } catch (const std::exception &e) {
-                    brls::Logger::error("web mask decompress exception: {}", e.what());
-                }
+                if (slice.offsetEnd == SIZE_T_MAX) slice.offsetEnd = text.size() + offset;
+                std::string data = wiliwili::decompressGzipData(
+                    text.substr(slice.offsetStart - offset, slice.offsetEnd - slice.offsetStart));
 
                 // 获取svg数据
                 size_t sliceOffset = 0;

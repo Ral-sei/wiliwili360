@@ -139,7 +139,9 @@ public:
     template <typename ReturnType>
     static int parseJson(const cpr::Response& r, const std::function<void(ReturnType)>& callback = nullptr,
                           const ErrorCallback& error = nullptr) {
+#if !defined(PLATFORM_XBOX360)
         try {
+#endif
             nlohmann::json res = nlohmann::json::parse(r.text);
             int code           = res.at("code").get<int>();
             if (code == 0) {
@@ -158,11 +160,13 @@ public:
             } else {
                 ERROR_MSG("Param error", -1);
             }
+#if !defined(PLATFORM_XBOX360)
         } catch (const std::exception& e) {
             ERROR_MSG("Api error. \n" + std::string{e.what()}, 200);
             printf("data: %s\n", r.text.c_str());
             printf("ERROR: %s\n", e.what());
         }
+#endif
         return 1;
     }
 
@@ -220,7 +224,9 @@ public:
         _cpr_post(
             url, parameters, payload,
             [callback, error](const cpr::Response& r) {
+#if !defined(PLATFORM_XBOX360)
                 try {
+#endif
                     nlohmann::json res = nlohmann::json::parse(r.text);
                     const int code     = res.at("code").get<int>();
                     if (code == 0) {
@@ -235,11 +241,13 @@ public:
                         return;
                     }
                     ERROR_MSG(res.at("message").get<std::string>(), code);
+#if !defined(PLATFORM_XBOX360)
                 } catch (const std::exception& e) {
                     ERROR_MSG(std::string(e.what()), r.status_code);
                     printf("data: %s\n", r.text.c_str());
                     printf("ERROR: %s\n", e.what());
                 }
+#endif
             },
             error);
     }
@@ -252,7 +260,9 @@ public:
         _cpr_post(
             url, parameters, payload,
             [callback, error](const cpr::Response& r) {
+#if !defined(PLATFORM_XBOX360)
                 try {
+#endif
                     nlohmann::json res = nlohmann::json::parse(r.text);
                     const int code     = res.at("code").get<int>();
                     if (code == 0) {
@@ -260,11 +270,13 @@ public:
                         return;
                     }
                     ERROR_MSG(res.at("message").get<std::string>(), code);
+#if !defined(PLATFORM_XBOX360)
                 } catch (const std::exception& e) {
                     ERROR_MSG(std::string(e.what()), r.status_code);
                     printf("data: %s\n", r.text.c_str());
                     printf("ERROR: %s\n", e.what());
                 }
+#endif
             },
             error);
     }

@@ -4,7 +4,13 @@
 #include <utility>
 #include <iostream>
 #include <cstring>
-#ifdef _WIN32
+#if defined(PLATFORM_XBOX360)
+// Xenon is big-endian, so host and network byte order are identical.
+#define ntohl(value) (value)
+#define ntohs(value) (value)
+#define htonl(value) (value)
+#define htons(value) (value)
+#elif defined(_WIN32)
 #include <winsock2.h>
 #else
 #include <arpa/inet.h>

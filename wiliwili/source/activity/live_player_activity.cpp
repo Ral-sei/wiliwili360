@@ -392,7 +392,9 @@ void LiveActivity::onDanmakuInfo(int roomid, const bilibili::LiveDanmakuinfo& in
     
     // 使用cpr::async在后台线程执行任务
     cpr::async([state, room_id_copy, emoticonsPtr, info, this]() {
+#if !defined(PLATFORM_XBOX360)
         try {
+#endif
             // 检查活动状态
             if (!state->isActive.load(std::memory_order_acquire)) {
                 brls::Logger::debug("LiveActivity: 线程中断: 对象已被销毁");
@@ -485,9 +487,11 @@ void LiveActivity::onDanmakuInfo(int roomid, const bilibili::LiveDanmakuinfo& in
             // 连接弹幕服务器
             this->danmaku.connect(room_id_copy, std::stoll(ProgramConfig::instance().getUserID()), info);
             
+#if !defined(PLATFORM_XBOX360)
         } catch (const std::exception& e) {
             brls::Logger::error("LiveActivity: 弹幕处理错误: {}", e.what());
         }
+#endif
     });
 }
 
