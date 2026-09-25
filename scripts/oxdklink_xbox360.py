@@ -72,10 +72,47 @@ def stage_file(path, stage, objcopy):
                                  capture_output=True, text=True)
         if process.returncode != 0:
             # Not every input is ELF with sections to remove (librarian alias
-            # members are machine 0x0000, for instance). Leave those alone.
-            sys.stderr.write('oxdklink_xbox360: keeping %s unstripped: %s'
+            # members are machine 0x0000, for instance). A failure can also be
+            # the result of an interrupted build (subprocess killed mid-run),
+            # which must not leave an unstripped copy cached: delete it and
+            # retry once so the next staging attempt starts from a clean copy.
+            sys.stderr.write('oxdklink_xbox360: first strip of %s failed: %s'
                              % (path, process.stderr.strip()) + '\n')
-        # Restore the source timestamp so the copy is recognised next time.
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+            shutil.copy2(source, staged)
+            process = subprocess.run([objcopy, '--remove-section=.deplibs', staged],
+                                     capture_output=True, text=True)
+            if process.returncode != 0:
+                sys.stderr.write('oxdklink_xbox360: keeping %s unstripped: %s'
+                                 % (path, process.stderr.strip()) + '\n')
+    # OXDK's builtins.c fills the gap between clang and the Microsoft C++
+    # library with zeroed dummy vtables for four __cxxabiv1 typeinfo classes.
+    # They make every dynamic_cast crash on the first virtual call. The real
+    # definitions come from libc++abi's private_typeinfo.cpp (compiled into
+    # xbox360_platform_shims), so remove the dummy definitions entirely. OXDK's
+    # linker can still select a weak archive member before seeing the strong
+    # definitions, so weakening alone is not sufficient. This must run even
+    # when the staged archive is timestamp-current: older wrapper versions left
+    # an unprocessed archive in the cache.
+    if os.path.basename(source) == 'libxbox360_runtime.a' and os.path.exists(staged):
+        strip_rtti = [objcopy]
+        for dummy in ('_ZTVN10__cxxabiv116__enum_type_infoE',
+                      '_ZTVN10__cxxabiv117__class_type_infoE',
+                      '_ZTVN10__cxxabiv120__si_class_type_infoE',
+                      '_ZTVN10__cxxabiv121__vmi_class_type_infoE',
+                      '_ZTIi'):
+            strip_rtti += ['--strip-symbol=' + dummy]
+        strip_rtti.append(staged)
+        process = subprocess.run(strip_rtti, capture_output=True, text=True)
+        if process.returncode != 0:
+            sys.stderr.write('oxdklink_xbox360: could not strip dummy RTTI vtables '
+                             'in %s: %s' % (path, process.stderr.strip()) + '\n')
+    if os.path.exists(staged):
+        # Restore the source timestamp after all staging transforms so the copy
+        # is recognised next time.
         os.utime(staged, (source_stat.st_atime, source_stat.st_mtime))
     return staged
 

@@ -19,7 +19,24 @@
 #include <SDL2/SDL_main.h>
 #endif
 
+#ifdef __XBOX360__
+#include <cstdlib>
+#include <exception>
+#include <typeinfo>
+#endif
+
 int main(int argc, char* argv[]) {
+#ifdef __XBOX360__
+    // OXDK's default std::terminate handler is a null pointer: any uncaught
+    // exception or failed dynamic_cast would jump to address 0 with no
+    // diagnostic. Install an abort handler so the terminate reason is at
+    // least visible in the XBDM debug output before the title dies.
+    std::set_terminate([]() {
+        brls::Logger::error("std::terminate called - aborting");
+        std::abort();
+    });
+#endif
+
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "-d") == 0) {
             brls::Logger::setLogLevel(brls::LogLevel::LOG_DEBUG);
@@ -47,6 +64,23 @@ int main(int argc, char* argv[]) {
 
     brls::Application::createWindow("wiliwili");
     brls::Logger::info("createWindow done");
+#ifdef __XBOX360__
+    // Dump the Itanium RTTI vtable slots before XML inflation. This identifies
+    // a bad XDK typeinfo table directly on hardware instead of relying on the
+    // later illegal-indirect-call address alone.
+    const std::type_info& boxType = typeid(brls::Box);
+    const std::type_info& viewType = typeid(brls::View);
+    auto dumpRtti = [](const char* name, const std::type_info& type) {
+        auto vtable = *reinterpret_cast<const uintptr_t* const*>(&type);
+        brls::Logger::info("Xbox RTTI {} type={:p} vtable={:p} slots={:p},{:p},{:p},{:p},{:p},{:p}",
+                           name, static_cast<const void*>(&type), static_cast<const void*>(vtable),
+                           reinterpret_cast<const void*>(vtable[0]), reinterpret_cast<const void*>(vtable[1]),
+                           reinterpret_cast<const void*>(vtable[2]), reinterpret_cast<const void*>(vtable[3]),
+                           reinterpret_cast<const void*>(vtable[4]), reinterpret_cast<const void*>(vtable[5]));
+    };
+    dumpRtti("Box", boxType);
+    dumpRtti("View", viewType);
+#endif
 
     // Register custom view\theme\style
     Register::initCustomView();

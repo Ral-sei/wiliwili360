@@ -223,7 +223,6 @@ string to_string(double)                    { return string("0"); }
 //    Provide zero-initialized BSS blobs via ELF .globl.
 // ============================================================================
 
-#if defined(__powerpc__) || defined(__ppc__) || defined(__PPC__)
 #define M3_STREAM_BSS(sym, nbytes) \
     __asm__( \
     ".globl " sym "\n" \
@@ -231,11 +230,6 @@ string to_string(double)                    { return string("0"); }
     ".weak " sym "\n" \
     sym ":\n" \
     ".zero " #nbytes "\n")
-#else
-#define M3_STREAM_BSS(sym, nbytes) \
-    static char _m3_bss_##sym[nbytes] __attribute__((used,section(".bss"))); \
-    __asm__(".globl " sym "\n" sym " = _m3_bss_" #sym "\n")
-#endif
 
 M3_STREAM_BSS("_ZNSt3__14cerrE",   64);
 M3_STREAM_BSS("_ZNSt3__14coutE",   64);
@@ -284,24 +278,23 @@ extern "C" __attribute__((noreturn)) void __abort_message(const char* format, ..
 // ============================================================================
 extern "C" {
 
-unsigned char* stbi_load_from_memory(const unsigned char* buffer, int len,
-                                     int* x, int* y, int* channels_in_file,
-                                     int desired_channels) {
-    (void)buffer; (void)len; (void)desired_channels;
-    if (x) *x = 0; if (y) *y = 0;
-    if (channels_in_file) *channels_in_file = 0;
-    return nullptr;
-}
-
-void stbi_image_free(void* retval_from_stbi_load) {
-    (void)retval_from_stbi_load;
-}
-
-const char* stbi_failure_reason(void) { return "stb_image not linked"; }
-
 } // extern "C"
 
 // ============================================================================
+extern "C" unsigned char m3_bit_scan_reverse(unsigned long* index,
+                                               unsigned long mask)
+    __asm__("_BitScanReverse");
+extern "C" unsigned char m3_bit_scan_reverse(unsigned long* index,
+                                               unsigned long mask) {
+    if (!mask) return 0;
+    unsigned long bit = sizeof(mask) * 8 - 1;
+    while (!(mask & (1UL << bit))) --bit;
+    *index = bit;
+    return 1;
+}
+
+extern "C" void* __cxa_bad_typeid() { std::abort(); }
+
 // 8. curl stubs (M4 territory)
 // ============================================================================
 // cpr headers already pull in curl/curl.h with real types; just define the functions.

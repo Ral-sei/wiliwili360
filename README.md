@@ -1,4 +1,4 @@
-<h1 align="center">Wiliwili Xbox 360 移植版</h1>
+<h1 align="center">WiliWili Xbox 360 移植版</h1>
 
 🚧施工中
 

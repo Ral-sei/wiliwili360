@@ -129,28 +129,6 @@ float fmaxf(float a, float b)
 // headers call them; the console CRT ships them only for the Microsoft
 // compiler's own code generation.
 
-unsigned char _BitScanReverse(unsigned long* index, unsigned long mask)
-{
-    if (!mask)
-        return 0;
-    unsigned long bit = 31;
-    while (!(mask & (1u << bit)))
-        --bit;
-    *index = bit;
-    return 1;
-}
-
-unsigned char _BitScanForward(unsigned long* index, unsigned long mask)
-{
-    if (!mask)
-        return 0;
-    unsigned long bit = 0;
-    while (!(mask & (1u << bit)))
-        ++bit;
-    *index = bit;
-    return 1;
-}
-
 // _InterlockedIncrement/_InterlockedDecrement are clang builtins on Xenon
 // (type: long (volatile long *)), no user definition needed.
 

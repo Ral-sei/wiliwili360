@@ -162,6 +162,26 @@ elseif (PLATFORM_XBOX360)
         ${CMAKE_CURRENT_SOURCE_DIR}/library/borealis/library/cmake/xbox360-cshim
         ${XBOX360_CURL_INCLUDE}
         ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/include)
+    # Real Itanium-ABI RTTI (__dynamic_cast + __cxxabiv1 typeinfo vtables) from
+    # the libc++abi sources that ship with the OXDK llvm tree. The placeholders
+    # that used to be stubbed here made every BRLS_BIND resolve() fail at
+    # runtime. OXDK's builtins.c provides zeroed dummy vtables for four of the
+    # typeinfo classes; oxdklink_xbox360.py weakens those during staging so the
+    # real definitions below win.
+    set(XBOX360_LIBCXXABI_DIR "$ENV{OXDK_LLVM}/../libcxxabi")
+    if (NOT EXISTS "${XBOX360_LIBCXXABI_DIR}/src/private_typeinfo.cpp")
+        message(FATAL_ERROR "libc++abi sources not found at ${XBOX360_LIBCXXABI_DIR}; set OXDK_LLVM to the OXDK llvm build directory")
+    endif ()
+    target_sources(xbox360_platform_shims PRIVATE "${XBOX360_LIBCXXABI_DIR}/src/private_typeinfo.cpp")
+    # libc++abi's typeinfo objects follow the ordinary 32-bit Itanium layout;
+    # compiling this implementation with the Xenon vtable-layout extension
+    # makes it read base_type at the wrong offset from compiler-emitted RTTI.
+    set_source_files_properties("${XBOX360_LIBCXXABI_DIR}/src/private_typeinfo.cpp"
+        PROPERTIES COMPILE_OPTIONS "-Xclang;-target-feature;-Xclang;-xenon-abi")
+    target_include_directories(xbox360_platform_shims SYSTEM PRIVATE
+        "${XBOX360_LIBCXXABI_DIR}/include"
+        "${XBOX360_LIBCXXABI_DIR}/src")
+    target_compile_definitions(xbox360_platform_shims PRIVATE _LIBCXXABI_BUILDING_LIBRARY)
     # libc++'s compiled half (iostreams, locale, streambuf, stdexcept) has no prebuilt
     # library for Xenon; OXDK builds one from libc++'s own sources when
     # OXDK360_LIBCXX_LIB=1 and scripts/build_xbox360_libcxx.sh mirrors that setup.

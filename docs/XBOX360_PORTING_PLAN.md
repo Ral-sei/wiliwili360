@@ -1,6 +1,6 @@
 # wiliwili Xbox 360 长线移植计划
 
-> 状态：M0 工具链基线已完成；M1 NanoVG D3D9 已完成 Xenon 编译、shader 生成、XEX 链接，并由真实 XDK 确认基础图形输出；M3 wiliwili UI 最小集成已完成编译和链接，路径规范化已实施但待实机验证（2026-09-21）
+> 状态：M0 工具链基线已完成；M1 NanoVG D3D9 已完成 Xenon 编译、shader 生成、XEX 链接，并由真实 XDK 确认基础图形输出；M3 wiliwili UI 最小集成已通过 Xbox 360 实机验收（2026-09-25）
 >
 > 目标：在 Xbox 360/XDK 上逐步运行 wiliwili，并保留现有 Desktop、Switch 等平台。
 >
@@ -367,14 +367,13 @@ stb_image 实现。这些必须在 M4 transport/runtime slice 中补齐，不能
 > 已实施修复：`BRLS_RESOURCES` 改为 `"game:\\resources\\"`，`resourcesDir()` 函数
 > 自动将 `/` 转 `\`，`BRLS_ASSET` 统一返回 `std::string`，`CFG_PATH_SEP` 宏
 > 控制 `config_helper` 中的拼接分隔符。参考了 ButterAndJelly 的 `platform_xenon.cpp`
-> 的 `NativePath` 实现。实机验证尚未完成。
+> 的 `NativePath` 实现。该路径方案已在 2026-09-25 Xbox 360 实机验收中确认可用。
 
-下一步仍以完整 `wiliwili` OXDK 编译和链接为门槛，随后再收敛到可打包、可启动的
-M3 离线 XEX；上述临时裁剪必须在对应里程碑恢复或重新设计。
+上述临时裁剪仍属于 M3 离线验证范围，网络/API 和播放器能力按 M4/M5 继续补齐。
 
-> **2026-09-21 更新：M3 编译和链接已完成。** 下一步是 M3 验收（在 Xenia 或
-> 真机上启动 XEX，验证 UI 框架初始化和渲染）和 M4（网络/API 层接入真实
-> Bilibili 数据）。详细计划见下方"下一步工作"章节。
+> **2026-09-25 更新：M3 已通过 Xbox 360 实机验收。** XEX 已启动并稳定显示离线
+> `HintActivity`，NanoVG、字体、XML、图片和 XInput 焦点导航均正常。下一步是
+> M4（网络/API 层接入真实 Bilibili 数据）。详细计划见下方"下一步工作"章节。
 
 ### M3：wiliwili UI 最小集成（L3）
 
@@ -404,25 +403,37 @@ M3 离线 XEX；上述临时裁剪必须在对应里程碑恢复或重新设计�
   - `BRLS_ASSET` 统一返回 `std::string`，所有 `std::string(BRLS_RESOURCES) + "xml/"` 改为 `BRLS_ASSET("xml/")`
   - `config_helper.hpp` 新增 `CFG_PATH_SEP` 宏，Xbox 360 用 `"\\"`
   - `shader_helper.cpp` 同步修复拼接
-- [ ] **路径验证**（待实机测试）：Xbox 360 SDK 要求只用反斜杠，`fopen` 能正常工作（ButterAndJelly 已验证），但 `game:\config\wiliwili` 目录是否可写、`game:\resources\` 是否能被 `fopen` 正确解析，仍需在 Xenia 或真机上确认。
+- [x] **路径验证**：`game:\config\wiliwili` 可写，`game:\resources\` 资源可正常读取，字体、XML 和图片加载通过实机验证。
 - [ ] 将离线静态页面替换为首页、设置页、搜索页和静态视频详情页。
 - [ ] 运行首页、设置页、搜索页和静态视频详情页。
 - [ ] 验证图片加载、SVG、滚动、RecyclingGrid 和焦点路由。
 - [ ] 实现 Xbox 360 资源路径和资源打包方式。
-- [ ] 增加平台专用输入映射，不改变通用 `Intent` 导航。
+- [x] 增加平台专用输入映射，不改变通用 `Intent` 导航；D-pad 和左右摇杆可驱动 borealis 焦点导航。
 - [ ] 暂时禁用或裁剪需要文本输入的功能。
 
-验收：XEX 可在 Xenia 或真机启动，UI 可连续使用；页面切换和返回不会泄漏或崩溃。
+验收：XEX 可在真机启动，UI 可连续使用；页面返回和退出确认流程正常。M3 已于
+2026-09-25 通过实机验收。
 
-当前阻塞（M3 验证）：
-- **路径问题**：Xbox 360 SDK 要求路径只用反斜杠（`dev_overview_filenames.htm`：
-  "Use the backslash (\) to separate components in a path. No other character is
-  acceptable as a path separator."）。已通过 `resourcesDir()` 做了 `/`→`\` 转换，
-  但实机验证尚未完成。已知 `game:\` 在 devkit 上可写（参考 ButterAndJelly 的
-  `platform_xenon.cpp`，其 `kDataRoot = "game:\\data"` 且用 `fopen` 测试可写性）。
+当前阻塞（M3 已解除）：
 - 所有 M3 shims 都是空实现，实际运行时 cpr HTTP 请求会返回空数据，
-  filesystem 操作会返回默认值，chrono 返回 epoch。M3 验证需要在
-  Xenia 或真机上确认 UI 框架能正常初始化和渲染。
+  filesystem 操作会返回默认值，chrono 返回 epoch。这些限制不影响已验收的
+  离线 UI 入口，但会阻塞后续网络/API 功能。
+
+#### 2026-09-25 实机验收记录
+
+- 当前 Xbox 360 入口在 `main.cpp` 中有意打开离线 `HintActivity`，用于验证 UI
+  框架和本地资源，不是首次运行向导，也没有完成或跳过状态。
+- 页面中的 NS 图片和文案（包括 “Select a game from home screen” 以及 NSP
+  forwarder 说明）来自项目原有的 Switch 安装教程资源；Xbox 360 构建只展示这组
+  本地静态内容，不会执行 Switch NSP 安装流程。
+- `HintActivity` 是根 Activity。按 B 会触发 borealis 的返回逻辑；没有上一级
+  Activity 时显示退出确认对话框，这是预期行为。选择取消可回到教程页面，选择确认
+  才退出应用。
+- D-pad、左右摇杆、LB/RB/LT/RT 和 A/B 均已在实机验证可用；教程左右页可通过
+  D-pad/摇杆或 LB/RB/LT/RT 切换。
+- 初次实机运行时发现教程 PNG 图片颜色异常，背景、文字和交互控件颜色正常；按
+  XDK 的 32 位纹理 `GPUENDIAN_8IN32` 规则，在 NanoVG RGBA 纹理创建和更新时执行
+  每像素字节重排。重新构建部署后，已确认图片颜色正常。
 
 ### M4：Xbox 360 网络/API 层（L3）
 
@@ -644,9 +655,7 @@ M0–M5 中可以有明确的临时限制，例如只支持匿名 480p、暂不�
 ## 10. 下一步工作（2026-09-21）
 
 ### 当前状态
-M3 编译和链接已完成，路径规范化已实施。XEX 产出 `build-xbox360-m2/wiliwili`。
-### 当前状态
-M3 编译和链接已完成，路径规范化已实施。XEX 产出 `build-xbox360-m2/wiliwili`。
+M3 编译和链接已完成。XEX 产出 `build-xbox360-m2/wiliwili`。
 
 2026-09-21 更新：`bili360-main` 的 `third_party/curl`（libcurl 7.37.1，含
 `config-xbox360.h` 和 `xbox360_stubs.c`）与 `third_party/mbedtls`
@@ -655,13 +664,48 @@ Xbox 360 分支优先使用仓库内副本，`BILI360_DIR` 环境变量仅作为
 构建不再依赖 `H:/bili360-main` 的绝对路径（OXDK/XDK/oxdk-llvm 工具链仍为
 本机环境依赖，不入库，XDK 不可再分发）。
 
-### 待验证
-1. **路径实机测试**：确认 `game:\resources\` 能被 `fopen` 正确解析（参考
-   ButterAndJelly `platform_xenon.cpp` 的 `NativePath` 实现和 `fopen` 测试）。
-2. **配置目录可写性**：确认 `game:\config\wiliwili` 在 devkit 上可写并能自动创建。
-3. **UI 框架初始化**：在 Xenia 或真机上启动 XEX，确认字体加载、XML 解析、
-   i18n 加载和 NanoVG 渲染正常。
+#### 2026-09-21 实机验证记录（devkit Cipher 日志）
 
-### 验证方法
-将 `build-xbox360-m2/wiliwili` 和 `resources\` 目录部署到 devkit 的游戏目录，
-观察启动日志是否仍有 "doesn't exist" 或 "not writable" 错误。
+第一轮修复后实机启动确认：
+
+- **路径规范化生效**：i18n 目录、内置字体（switch_font/keymap/material/emoji）
+  全部正常加载，不再出现 "doesn't exist" / 混合分隔符路径。
+- **配置目录创建和写入生效**：`game:\config\wiliwili\wiliwili_config.json`
+  成功写入并在重启后读取。
+- **首个崩溃已定位并修复**：`AppletFrame` 构造中 `BoundView<Image>::resolve()`
+  的 `dynamic_cast` 命中 M3 占位 stub（恒返回 nullptr）→ `std::terminate` →
+  空 terminate handler → 跳转地址 0（IAR=0x0）。修复方式：
+  - 编译 libc++abi `private_typeinfo.cpp`（位于 `$OXDK_LLVM/../libcxxabi`），
+    提供 Itanium `__dynamic_cast` 与全部 `__cxxabiv1` typeinfo vtable；
+  - M3 shim 中的 `__dynamic_cast`/vtable blob 桩已删除，改为提供
+    `__abort_message`（DbgPrint 输出后 abort，崩溃原因可见于 XBDM 日志）；
+  - OXDK `builtins.c` 的 4 个全零假 vtable 与 `_ZTIi` 假 typeinfo 在
+    `oxdklink_xbox360.py` 暂存阶段用 `llvm-objcopy --weaken-symbol` 弱化，
+    让真实定义获胜（修改 staging 逻辑后需删除
+    `.oxdklink/inputs/*libxbox360_runtime.a` 再重链）。
+- 构建脚本 `scripts/build_xbox360_wsl.sh` 改为 `-j12`。
+- 新增调试脚本：`scripts/symbolize_xbox360.sh`（按 title.elf 符号化崩溃地址）、
+  `scripts/disasm_xbox360.sh`、`scripts/find_sym_xbox360.sh`。
+
+### M3 已完成
+
+上述实机验收已覆盖 AppletFrame 构造、字体渲染、XML 视图树、i18n 文案、NanoVG
+渲染、本地图片和 XInput 焦点导航。首页、设置页、搜索页、视频详情页以及网络/API
+接入仍属于后续 M4/M5 工作，不影响 M3 的离线 UI 验收结论。
+
+### 已知后续事项
+- `std::terminate` 默认 handler 在本平台为空指针（OXDK libcxx_runtime.cpp 的
+  `oxdk360_terminate_handler` 初始为 0）；下次 terminate 仍会跳 0。可在启动时
+  `set_terminate` 安装 abort handler 改善崩溃诊断。
+- `game:\config\wiliwili` 在 devkit 上已确认可写；零售机/模拟器行为待测。
+
+### 2026-09-25 Debian 构建记录
+
+已在纯 Debian 环境重新跑通 Xenon 编译和 XEX 链接。新增
+`scripts/build_xbox360_linux.sh`，脚本会自动配置 CMake/Ninja、创建无空格的
+XDK 路径、构建 OXDK libc++，并将 OXDK 转换缓存放在构建目录。详细依赖、环境变量、
+构建命令和故障排查见 `docs/XBOX360_DEBIAN_BUILD.md`。
+
+本次验证产物为 `build-xbox360-debian/wiliwili`，链接输出显示 147 个对象、9 个
+XDK 库，基址 `0x82000000`。该记录只覆盖交叉编译和链接，Xenia/真实开发机部署仍
+需单独验收。

@@ -7,24 +7,35 @@
 # scripts/print_cxxflags.mk so the headers and the compiled half always match.
 set -eu
 
-REPO=/mnt/h/wiliwili
-BUILD=${REPO}/build-xbox360-m2
+REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+BUILD=${BUILD:-${REPO}/build-xbox360-m2}
 OXDK_LIB=${BUILD}/libcxx-xenon.a
 
-export OXDK_DIR=/mnt/h/OXDK
-export XDK_DIR=/root/xdk360
-export OXDK_LLVM=/root/oxdk-llvm/build
-export LLVM_PREFIX=/root/oxdk-llvm/build
-export PATH=/root/oxdk-llvm/build/bin:/usr/bin:/bin
+: "${OXDK_DIR:=/mnt/h/OXDK}"
+: "${XDK_DIR:=/root/xdk360}"
+: "${OXDK_LLVM:=/root/oxdk-llvm/build}"
+: "${LLVM_PREFIX:=${OXDK_LLVM}}"
+export OXDK_DIR XDK_DIR OXDK_LLVM LLVM_PREFIX
+export PATH="${OXDK_LLVM}/bin:/usr/bin:/bin"
+export OXDK_ROOT="${OXDK_ROOT:-${OXDK_DIR}}"
+export OXDK360_DIR="${OXDK360_DIR:-${OXDK_DIR}/xbox360}"
+export OXDK360_LIBCXX_DIR="${OXDK360_LIBCXX_DIR:-${OXDK_LLVM}/../libcxx/include}"
 
 python3 "${REPO}/scripts/fix_crlf.py" "${REPO}/scripts/print_cxxflags.mk"
-cp "${REPO}/scripts/print_cxxflags.mk" /tmp/wiliwili_print_cxxflags.mk
-FLAGS=$(cd /tmp && make -f wiliwili_print_cxxflags.mk print)
+FLAGS_MK=$(mktemp "${TMPDIR:-/tmp}/wiliwili_print_cxxflags.XXXXXX.mk")
+trap 'rm -f "${FLAGS_MK}"' EXIT
+cp "${REPO}/scripts/print_cxxflags.mk" "${FLAGS_MK}"
+FLAGS=$(make -f "${FLAGS_MK}" \
+    OXDK_ROOT="${OXDK_ROOT}" \
+    OXDK360_DIR="${OXDK360_DIR}" \
+    OXDK360_LIBCXX_DIR="${OXDK360_LIBCXX_DIR}" \
+    CLANG="${OXDK_LLVM}/bin/clang" print)
+FLAGS="${FLAGS} -isystem ${REPO}/library/borealis/library/cmake/xbox360-cshim -isystem ${OXDK_DIR}/xbox360/oxdk360/header-shim"
 
 make -C "${OXDK_DIR}/xbox360/oxdk360/libcxx-lib" \
     CLANG="${OXDK_LLVM}/bin/clang" \
     LLVM_AR="${OXDK_LLVM}/bin/llvm-ar" \
-    LIBCXX_SRC=/root/oxdk-llvm/libcxx \
+    LIBCXX_SRC="${LIBCXX_SRC:-${OXDK_LLVM}/../libcxx}" \
     OXDK360_CXXFLAGS="${FLAGS}" \
     BUILD="${BUILD}/libcxx-obj" \
     LIB="${OXDK_LIB}"
