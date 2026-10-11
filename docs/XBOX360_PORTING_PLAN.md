@@ -1,10 +1,11 @@
 # wiliwili Xbox 360 长线移植计划
 
-> 状态：M0 工具链基线已完成；M1 NanoVG D3D9 已完成 Xenon 编译、shader 生成、XEX 链接，并由真实 XDK 确认基础图形输出；M3 wiliwili UI 最小集成已通过 Xbox 360 实机验收（2026-09-25）
+> 状态：M0 工具链基线已完成；M1 NanoVG D3D9 已完成 Xenon 编译、shader 生成、XEX 链接，并由真实 XDK 确认基础图形输出；M3 wiliwili UI 最小集成已通过 Xbox 360 实机验收（2026-09-25）；M4 网络/API 首页链路已通过 Xbox 360 实机验收（2026-09-26）；M5/M6 已完成首次真实视频播放验证（2026-09-30）；M7 点播卡顿根因已定位并实机验证修复（2026-10-02，720p 窗口化/全屏与 360p 窗口化均 30fps 视频 + 53–60fps UI），直播卡顿排查与 PSV-parity 对策已部署 round-6 待验证（2026-10-04，见 `XBOX360_PLAYBACK_PERFORMANCE_PLAN.md` §14）；空实现审计 A 类 5 条已修复并通过全量编译（2026-10-04，`XBOX360_EMPTY_IMPL_AUDIT.md` §6）。M5 完整闸门（暂停/seek/停止/EOF）、M6 生命周期验收与长期稳定性尚未通过
 >
 > 目标：在 Xbox 360/XDK 上逐步运行 wiliwili，并保留现有 Desktop、Switch 等平台。
 >
 > 参考：本仓库、`H:/bili360-main`、`H:/OXDK`、`H:/ffmpeg-xenon`，以及本地 Xbox 360 XDK 文档。
+> 配套文档：`XBOX360_PLAYBACK_PERFORMANCE_PLAN.md`（播放性能，§11–§14 为最新实机记录）、`XBOX360_EMPTY_IMPL_AUDIT.md`（空实现审计）、`XBOX360_NETWORK_PERFORMANCE_REVIEW.md`、`XBOX360_UI_PERFORMANCE_REVIEW.md`、`XBOX360_DEBIAN_BUILD.md`。
 
 ## 1. 结论摘要
 
@@ -23,14 +24,14 @@ borealis Xbox 360 平台层
     ↓
 wiliwili UI/API（先不接播放器）
     ↓
-FFmpeg + 自有 Xbox360PlayerCore
+FFmpeg + MPV（优先评估 libmpv 最小移植）
     ↓
 完整播放页和生命周期
     ↓
-评估 MPV/ANGLE（可选）
+必要时切换到 Xbox360PlayerCore 兜底
 ```
 
-第一版不应把“完整移植 libmpv”作为前置条件。可以用 `bili360-main` 已验证的 custom AVIO + FFmpeg + D3D9/XAudio2 播放链路替代 Xbox 360 上的 libmpv 实现，但最终必须提供与 wiliwili 播放器契约等价的功能，而不是只保留固定视频播放。
+当前方向调整为优先评估并移植 MPV，使 Xbox 360 播放器行为尽量与上游同步。第一步不是直接承诺完整移植，而是用固定版本的 MPV、FFmpeg-xenon 和最小 libmpv 配置做可行性闸门：确认 MPV 核心、解复用、解码、时钟、线程和渲染接口能在 Xenon ABI/XDK 上编译、链接并运行。若 MPV 需要大规模修改才能适配 FFmpeg 1.2.x 或 XDK runtime，才切换到 `Xbox360PlayerCore` 作为主线兜底；无论采用哪条路线，都必须提供与 wiliwili 播放器契约等价的功能。
 
 ## 2. 难度标记
 
@@ -234,8 +235,9 @@ M1 尚未完成的部分主要是 GPU/纹理/Present 验证。独立 NanoVG XEX 
 当前进度：已加入 `xbox360` 平台目录、`Xbox360Platform` 工厂分支、NanoVG D3D9
 视频上下文，以及 XInput/IME/字体加载器接口实现。XInput 已完成首个手柄的连接检测、
 A/B/X/Y、方向键、肩键、摇杆、扳机和震动映射；字体加载器支持用户 regular/icon/emoji、
-内置 switch 字体和 material fallback。IME 仍为最小拒绝实现，设备状态恢复、Present
-稳定性和 borealis demo 验收仍待完成。当前实现属于平台层骨架，不能视为 M2 验收完成。
+内置 switch 字体和 material fallback。IME 仍为最小拒绝实现（2026-10-04 起打开时给出 i18n
+提示，不再静默失败），完整文本输入仍待后续里程碑；设备状态恢复、Present 稳定性和
+borealis demo 验收仍待完成。当前实现属于平台层骨架，不能视为 M2 验收完成。
 
 目标：让 borealis 的基础应用在 Xbox 360 上运行，但暂不接 Bilibili 播放。
 
@@ -251,7 +253,8 @@ library/borealis/library/lib/platforms/xbox360/
 - [x] `Xbox360VideoContext`：已接入 XDK/Xenon D3D9 device、backbuffer、frame 生命周期和 Present 骨架；设备创建/Present 错误现在记录日志，NanoVG frame 所有权统一由 `Application::frame()` 管理；设备丢失/恢复和真实硬件稳定性仍未验收。
 - [x] `Xbox360InputManager`：XInput 状态、基础焦点导航按钮和震动映射。
 - [ ] `Xbox360InputManager`：重复按键/长按时间戳与多手柄聚合。
-- [x] `Xbox360Ime`：已提供最小拒绝实现；完整文本输入仍不支持。
+- [x] `Xbox360Ime`：已提供最小拒绝实现；2026-10-04 起打开文本/数字输入时给出 i18n 提示，完整文本输入仍不支持。
+- [x] borealis `Threading`：Xbox 分支启用真实 `task_loop` 后台线程（2026-10-04），`brls::async` 队列可正常排空（此前为只进不出的死队列）。
 - [x] `Xbox360FontLoader`：用户字体路径、内置字体和 material/emoji fallback。
 - [x] `Xbox360Platform`：已接入工厂、窗口尺寸和平台对象生命周期骨架；完整初始化、退出、计时和资源路径仍待实现。
 - [x] 将 NanoVG context 注入 `brls::Application`；运行时显示验收仍待完成。
@@ -350,7 +353,7 @@ library/borealis/library/lib/platforms/xbox360/
   因此弹幕 stroke 效果未验收。
 - Windows `dbghelp` minidump 明确不用于 Xbox；Xbox 崩溃日志/转储仍待独立实现。
 - `VideoProfile` 在 M3 不读取 libmpv 的 `mpv_node` 缓存和编解码统计，Xbox 上暂时
-  显示 `Unavailable`；M5/M6 接入 `Xbox360PlayerCore` 后改为读取等价播放器诊断状态。
+  显示 `Unavailable`；M5/M6 接入 libmpv 或 Xbox360PlayerCore 后改为读取等价播放器诊断状态。
 - 登录、直播和视频 API 源文件当前只要求通过无异常编译，不代表 M4/M5/M6 已接通。
 
 当前链接阶段仍有明确阻塞：M3 的 CPR/HTTP worker 暂未实现，导致 `cpr::`、`curl_*`
@@ -437,27 +440,34 @@ stb_image 实现。这些必须在 M4 transport/runtime slice 中补齐，不能
 
 ### M4：Xbox 360 网络/API 层（L3）
 
+> **M4 首页网络链路已完成实机验收**（2026-09-26）：XNet/WSA 初始化、XNet DNS、mbedTLS/curl/cpr 接入、WBI 请求和首页数据加载均已在真实 XDK 上验证。
+
 目标：在保留现有 API 数据模型的前提下接入已验证的 Xbox 360 网络实现。
 
 推荐优先复用 `bili360-main` 的 libcurl + mbedTLS，而不是立即切换 XboxTLS。
 
 任务：
 
-- [ ] 将 `HttpRequest` 抽象成 wiliwili 可使用的响应接口。
-- [ ] 初始化 `XNetStartup`，再调用 `WSAStartup`。
-- [ ] 接入 XNet DNS resolver。
-- [ ] 接入 CA bundle、hostname 校验、证书有效期校验。
-- [ ] 实现 GET、POST、Cookie、Range、超时和取消。
-- [ ] 保留 WBI 参数签名逻辑。
-- [ ] 将 cpr 异步接口替换为平台 worker/回调队列。
-- [ ] 限制响应体、日志和 Cookie 输出，避免泄露凭据。
+- [x] 将 `HttpRequest` 抽象成 wiliwili 可使用的响应接口。
+- [x] 初始化 `XNetStartup`，再调用 `WSAStartup`。
+- [x] 接入 XNet DNS resolver。
+- [ ] 接入 CA bundle、hostname 校验、证书有效期校验（当前开发机未部署 CA bundle，Xbox 分支暂时关闭 TLS 校验）。
+- [x] 实现 GET、POST、Cookie、Range、超时和取消所需的 cpr/curl transport。
+- [x] 保留 WBI 参数签名逻辑。
+- [x] 将 cpr 异步接口接入现有线程/回调队列。
+- [x] 限制响应体、日志和 Cookie 输出，避免泄露凭据。
 
-当前进度：已增加 `XBOX360_BUILD_MBEDTLS=ON` 的 mbedTLS 静态库接线，来源为
-`XBOX360_BILI360_DIR`/`BILI360_DIR` 指向的 `bili360-main/third_party/mbedtls`，并已增加
-`XBOX360_BUILD_CURL=ON` 的 bili360 libcurl 静态库目标。`xbox360_mbedtls` 和
-`xbox360_curl` 已可独立编译并生成 `.a` 文件；这只是源码/静态库准备，不代表 M4 网络链路完成。
-尚未把 curl backend、XNet resolver、CA bundle、hostname/证书校验和异步 HTTP 接口接入
-wiliwili。
+当前实现使用 `XBOX360_BILI360_DIR`/`BILI360_DIR` 指向的 mbedTLS 与 vendored curl，
+并通过 cpr 接入 wiliwili 的异步 API。已处理旧 curl 在 Xenon ABI 下的
+`Content-Length` 和 chunked 长度解析问题；否则首页请求会在已收到完整响应后继续等待并超时。
+CA bundle/hostname/证书有效期校验仍需后续补齐后再恢复 TLS 校验。
+
+#### 2026-09-26 实机验收记录
+
+- 按“先启动 XBDM 日志监听，再部署并启动 XEX”的顺序验证。
+- WBI 请求返回 HTTP 200；259 字节固定长度响应和约 41 KB chunked 响应均正常结束。
+- 首页 Explore 页面加载出视频卡片，不再显示 `WBI签名获取失败` 或 `Network error.[Status code: 0]`。
+- 最终截图：`/tmp/wiliwili-xbox360-m4-final.png`。
 
 WSL 验证命令：
 
@@ -484,42 +494,59 @@ cmake --build build-xbox360-tls --target xbox360_mbedtls xbox360_curl -v
 
 验收：匿名推荐、视频详情、`view/playurl` 和 QR 登录轮询可以完成；HTTPS 证书错误会失败关闭。
 
-### M5：FFmpeg + Xbox360PlayerCore（L5）
+### M5：FFmpeg + MPV 可行性评估与最小移植（L5）
 
-目标：用 Xbox 360 可行的播放器实现替代 libmpv 播放 Bilibili DASH，同时保持 wiliwili 的播放器功能契约，包括加载、暂停、恢复、停止、进度、seek、倍速、音量、清晰度、备用 URL、错误状态、自然 EOF 和返回页面生命周期。
+> **首次播放闸门已通过（2026-09-30）**：真实 Xbox 360 已能从视频详情页加载并播放 Bilibili 视频。当前仅证明解复用、TLS、解码、MPV 事件和视频输出链路可以贯通，不代表性能或完整播放器行为已经达标。
+
+目标：优先把 MPV/libmpv 移植到 Xbox 360，保持与上游播放器实现同步。M5 首先是一个有明确退出条件的可行性评估，不以“能编译一部分 MPV”作为成功标准。
+
+#### 当前初步评估
+
+- **上层复用价值高**：`VideoView`、播放器 Activity、`MPV_E` 事件和 `VideoProfile` 已直接围绕 `MPVCore` 建模，成功移植 libmpv 可以显著减少 Xbox 360 专用播放器分叉。
+- **核心技术风险高**：当前 Xbox 360 已验证的 `ffmpeg-xenon` 是 FFmpeg 1.2.x 路线；现代 MPV 通常依赖更新的 FFmpeg API、Meson 构建逻辑和更多 C/POSIX runtime 能力，版本必须先固定再评估，不能假设直接兼容。
+- **后端风险可控但工作量大**：MPV 的视频输出需要接入 Xbox 360 XDK D3D9，音频输出需要 XAudio2；M1/M2 已验证的图形和平台骨架可以复用，但不等于 MPV renderer/backend 已可用。
+- **网络路径可复用**：M4 的 XNet/libcurl transport 可以作为 MPV 的网络输入基础，但需要确认 MPV demuxer 对独立 DASH 视频/音频 URL、Range、取消和超时的调用方式。
+- **结论**：MPV 路线已经通过“能在真实 Xbox 360 上启动并开始播放”的初步可行性检查，继续作为当前主线；仍保留 Xbox360PlayerCore 作为性能或兼容性无法达标时的退出路径。
 
 任务：
 
-- [ ] 从 `bili360-main` 移植独立视频/音频 CurlStream。
-- [ ] 为两个 m4s 输入分别建立 custom AVIO。
-- [ ] 复用 FFmpeg 1.2.x 的 `AVFormatContext`、`AVCodecContext` 和帧解码流程。
-- [ ] 实现 AVC 质量选择和 AAC 音频选择。
-- [ ] 将 YUV frame 上传至**Xbox 360 兼容的** D3D9 Y/U/V 纹理，确认 pitch、对齐、线性纹理格式和锁定/上传路径。
-- [ ] 将 PC/通用 shader 改为 Xbox 360 XDK 可加载的 vertex/pixel shader 字节码或对应 XDK 编译流程。
-- [ ] 将 AAC 解码 PCM 提交至 XAudio2。
-- [ ] 用 XAudio2 时钟作为视频同步主时钟。
-- [ ] 实现暂停、停止、进度、取消、自然 EOF 和基本 seek。
-- [ ] 添加与 `MPVCore` 功能等价的 Xbox 360 播放器接口；允许内部实现完全不同，但不能把接口降级为固定 URL/固定质量/仅播放一次。
-- [ ] 将状态转换为 `MPV_E` 或新的通用播放器事件。
+- [ ] 固定 MPV、FFmpeg-xenon、XDK 和 Xenon clang/lld 版本，记录对应提交和补丁。
+- [ ] 清点 MPV 对 FFmpeg API、pthread/线程、原子操作、动态加载、文件系统、时间/时钟、网络协议、iconv、Lua/脚本、音频输出和视频输出的依赖。
+- [ ] 建立不依赖桌面窗口系统的最小 libmpv 构建配置，关闭 Lua、脚本、Wayland/X11/SDL、桌面音频后端和不适用于 XDK 的动态模块。
+- [x] 验证 MPV 核心、FFmpeg 解复用/解码、消息队列和播放事件在 Xenon ABI 下编译、链接并运行。
+- [x] 把 cbffmpeg P4 产出的 `libmpv_xbox360_compat.a`、FFmpeg 六静态库与
+      `xbox_float_math.o` 链接进 wiliwili 本体（归档与顺序见 `CMakeLists.txt`
+      §libmpv，文档在 `../cbffmpeg/docs/wiliwili_mpv_embed.md`）；`mpv_core.cpp`
+      以 `-DMPV_SW_RENDER=ON` 软渲染路径编译。这是首次播放闸门的链接前提。
+- [x] 让 MPV/FFmpeg 使用 Xbox 360 网络路径加载 Bilibili 视频 URL；独立视频/音频 URL 已能进入 demuxer 并开始播放。Range、取消、重试和超时仍需专项验证。
+      零售机曾因 FFmpeg socket 未做 SNL 0x5801 标记导致所有流静默超时，已于 2026-10-11 修复
+      （见 §10「2026-10-11 零售机视频流播放修复」）。
+- [ ] 评估 FFmpeg 1.2.x 与目标 MPV 版本的 API/ABI 兼容性；若必须升级 FFmpeg，记录 Xenon 编解码器、线程和内存预算影响。
+- [ ] 评估 MPV 视频输出：优先复用/扩展 Xbox 360 D3D9 backend；确认 YUV 纹理、shader、pitch、资源池和 UI overlay 状态恢复。
+- [ ] 评估 MPV 音频输出：实现或接入 XAudio2 backend，并以音频时钟驱动视频同步。
+- [ ] 在脱离 wiliwili 的最小播放器样例中完成匿名 480p 的加载、播放、暂停、seek、停止、EOF 和错误路径；目前完成的是 wiliwili 视频详情页中的首次播放，不是完整独立样例验收。
+- [ ] 输出 `docs/XBOX360_M5_MPV_FEASIBILITY.md`，包含依赖矩阵、补丁清单、XEX 大小/内存/线程记录、实机日志和继续或退出建议。
 
-验收：匿名 480p 视频能够启动、播放、暂停、退出，B 键取消后能回到 UI；不存在后台 worker 卡死。
+验收闸门：第一阶段“真实 Xbox 360 可加载并开始播放”已通过。完整闸门仍要求匿名 480p DASH 能稳定播放、暂停、seek、停止并自然 EOF，且 XDK 线程退出、音视频同步和 UI overlay 没有已知死锁或状态破坏。性能方面：点播 720p 窗口化/全屏卡顿已于 2026-10-02 定位并修复（回写 M7），直播 1080p 对策 round-6 已部署待验证（2026-10-04），整体性能验收仍未完成；若优化后仍无法达到目标，再评估 `Xbox360PlayerCore` 兜底路线。
 
-性能目标：先达到 480p 稳定播放，再评估 720p；不把 1080p/硬件解码作为第一版门槛。
+性能目标：先达到 480p 稳定播放，再评估 720p；不把 1080p/硬件解码作为第一版门槛。点播卡顿根因（非 1:1 几何下 mpv 默认 `SWS_LANCZOS` 软件重采样 440ms/帧）已于 2026-10-02 定位修复；直播 1080p 卡顿根因与对策见 `XBOX360_PLAYBACK_PERFORMANCE_PLAN.md` §14，round-6 待实机验证。下一步回到完整闸门验收（暂停、seek、停止、EOF、线程退出）。
 
 ### M6：视频页和播放器生命周期集成（L4）
 
-目标：把 Xbox360PlayerCore 接入 `VideoView`、播放器 Activity 和全局事件。它可以替代 Xbox 360 上的 MPVCore，但不能改变上层 wiliwili 的功能语义。
+> **首次视频页播放已验证（2026-09-30）**：用户从视频详情页手动开始播放后，MPV/FFmpeg 已完成真实网络加载并输出视频。该记录不等于生命周期验收；返回、重复播放、暂停、seek、EOF 和资源释放仍待逐项确认。
+
+目标：把通过 M5 闸门的 libmpv 接入 `VideoView`、播放器 Activity 和全局事件；若 M5 退出到兜底路线，则接入等价的 Xbox360PlayerCore。两条实现都不能改变上层 wiliwili 的功能语义。
 
 任务：
 
-- [ ] 将 `VideoView` 中直接依赖 mpv 的调用改为播放器接口。
+- [ ] 将 `VideoView` 中直接依赖平台播放器的调用收敛为稳定接口。
 - [ ] 保留 Desktop/Switch 的 MPVCore 实现。
-- [ ] Xbox 360 使用条件编译选择 Xbox360PlayerCore；允许 Xbox 360 内部不链接 libmpv，但必须实现等价的播放器行为。
+- [x] Xbox 360 当前选择 MPV/libmpv 路线并接入现有 `MPVCore` 播放路径；完整等价行为仍待验收。
 - [ ] 映射音量、倍速、画面比例、暂停、重播和进度条。
 - [ ] 处理 Activity 进入/退出、重复播放和播放失败。
 - [ ] 确认 D3D9 UI overlay 与视频纹理不会互相破坏状态。
 
-验收：从首页进入视频页、播放、返回首页、再次播放至少重复 20 次无泄漏或死锁。
+验收：从首页进入视频页、播放、返回首页、再次播放至少重复 20 次无泄漏或死锁。目前仅完成首次播放验证，尚未通过此项验收。
 
 ### M7：功能补齐和性能优化（L4）
 
@@ -533,24 +560,52 @@ cmake --build build-xbox360-tls --target xbox360_mbedtls xbox360_curl -v
 - [ ] 封面下载缓存和纹理 LRU。
 - [ ] 网络缓冲、断线重试和 CDN 切换。
 - [ ] 内存预算、纹理预算和 worker 数量限制。
+- [x] 定位并解决当前严重卡顿：记录解码 FPS、显示 FPS、丢帧数、缓冲状态、音频队列和主线程耗时。
+  - 结果（2026-10-02，四轮实机采集，`XBOX360_PLAYBACK_PERFORMANCE_PLAN.md` §11–§13）：
+    根因为 M1——窗口化时 surface 跟随视图 rect，mpv 默认 `SWS_LANCZOS`+HQ flags 在
+    **纯标量 sws**（ffmpeg `HAVE_ALTIVEC=0`）下对 1280x720→800x450 需 **440ms/帧**；
+    全屏因 surface 恰为 1280x720 命中 unscaled 拷贝而流畅。解码侧无罪
+    （`decoder-frame-drop-count=0`，与 cbffmpeg P2 基线一致）。
+  - 修复：**1:1 surface**（Xbox，`setFrameSize` 在宽高比一致时用视频原始尺寸 + `draw()`
+    检测 `video-params` 变化触发）为主；`sws-scaler=area` + `sws-fast` 兜底回退路径。
+  - 验证：720p 窗口化/全屏、640x360 窗口化均 30fps 视频 + 53–60fps UI；
+    `[x360-perf]`/`[x360-sw]`/`[x360-mpv]` 探针留在树内供回归使用（日志行说明见性能计划 §10）。
+  - 未录音频队列（当时未列为瓶颈，音频帧率 P2 已证 6269 帧/s 无压力）。
+- [x] 直播卡顿排查与对策（2026-10-03 ~ 10-04，`XBOX360_PLAYBACK_PERFORMANCE_PLAN.md` §14）：
+  - 焦点切换冻结 = Hint 销毁/重建风暴（每次焦点移动全量重建按钮 Hint，冻结 5.5~9.3s）；
+    已用 Hint 复用池修复并实测通过（round-4 定位 / round-5a 验证）。
+  - 堆锁“单点巨持锁者”假说在已钩路径上证伪（round-5b）：真实形态是 CPU 饱和下锁持有者
+    被时间片抢占引发的全网护航，堆慢行是受害者/放大器而非第一因。
+  - 主根因实锤 = 1080p 直播源 × surface 1280x720 上限 → 每帧标量重采样 254~359ms；
+    服务端实测约 85% 房间无视 qn=250 返回原画，1080p 直播不可回避。
+  - 对策（用户决策“PSV 怎么处理 360 就怎么处理”，仅 `PLATFORM_XBOX360`）：surface 上限
+    提到 3840x2160，1:1 surface + `Xbox360YUVRenderer` viewport 硬件缩放。
+  - round-6 已部署（XEX md5 `8d31a8579f8dcd9c26086b3fc171086e`）：1080p copy 路径、
+    3049KiB/帧上传耗时、decoder 丢帧与 720p 回归待实机验证。
+- [x] 空实现审计复核与 A 类修复（2026-10-04，`XBOX360_EMPTY_IMPL_AUDIT.md` §6）：
+  `cpr::MultiPerform` 串行实现（恢复追番/影视分类筛选）、borealis `Threading` 真实后台线程、
+  IME 打开时 i18n 提示、限帧 `sleep_for` 放行、`std::to_string(float/double)` 真实现；
+  另修复 `build_xbox360_local.sh` 的 `XDK_DIR` 少一级与缺 `LLD` 两处从零构建缺陷。
+  全量编译 424/424 + 链接通过（162 objects，image 0x13c0000）。B 类 12 条为有意保留的
+  里程碑限制，本轮未动。
+- [ ] 优化视频帧上传/纹理更新、D3D9 状态切换和 UI redraw，确认播放线程不会被 UI 或图片请求长期抢占。
+- [ ] 评估 Xbox 360 硬件解码或更低开销的 H.264 视频输出路径；在确认软件解码性能瓶颈前不将其作为既定方案。
 - [ ] 720p 性能、帧丢弃和音视频同步调优。
 - [ ] XEX 资源打包、版本信息、崩溃日志和部署脚本。
 
 验收：长时间浏览和播放不超出内存预算；异常网络和取消路径均能回到可操作 UI。
 
-### M8：MPV/ANGLE 研究线（L5，可选）
+### M8：播放器路线兜底与长期维护（L5，可选）
 
-目标：评估是否值得保留现有 MPV 功能，而不是替代 Xbox360PlayerCore。
+目标：在 M5 的 MPV 路线无法满足内存、性能或 XDK 兼容性要求时，维护 FFmpeg + Xbox360PlayerCore 作为可发布的替代实现；若 MPV 通过闸门，则用于补齐 MPV 功能和上游同步。
 
 任务：
 
-- [ ] 确认目标 MPV 版本与 FFmpeg 1.2 API 是否兼容。
-- [ ] 清点 MPV 对 pthread、动态加载、文件系统、网络和 C++ runtime 的依赖。
-- [ ] 验证 ANGLE 是否能在 Xbox 360 D3D9 上工作。
-- [ ] 验证 MPV software renderer 的最小编译集合。
-- [ ] 比较 MPV 和自有播放器的内存、性能和维护成本。
+- [ ] 比较 MPV 和 Xbox360PlayerCore 的内存、性能、补丁数量和维护成本。
+- [ ] 为未被 MPV 覆盖的 XDK 能力补齐专用后端或适配层。
+- [ ] 评估是否需要保留 MPV software renderer 或独立的视频输出路径。
 
-退出条件：如果需要大规模修改 MPV、ANGLE 或 FFmpeg，继续维护 Xbox360PlayerCore，不阻塞主线。
+退出条件：如果 MPV 需要大规模修改 MPV、FFmpeg 或 XDK runtime，或者无法达到 480p 稳定播放和生命周期验收，则继续维护 Xbox360PlayerCore，不阻塞主线。
 
 ## 5. 依赖和复用建议
 
@@ -576,11 +631,12 @@ cmake --build build-xbox360-tls --target xbox360_mbedtls xbox360_curl -v
 | PC D3D9 与 Xbox 360 XDK D3D9 不兼容 | L4 | PC backend、shader、纹理和资源管理无法直接使用 | 以 XDK/Xenon 为目标重写平台层；PC 代码只作为参考 |
 | `nanovg_d3d` 实际不是 D3D9 backend | L4 | 无法直接接入 borealis | 先做独立 Xbox 360 样例；必要时 fork 或自写 XDK D3D9 backend |
 | borealis 假设 OpenGL/D3D11 状态 | L4 | UI 绘制异常 | 参考 Switch/PSV 后端，集中封装状态切换 |
-| libmpv 无法在 Xenon ABI 下编译 | L5 | MPV 路线中止 | 使用 Xbox360PlayerCore，不阻塞主线 |
+| libmpv 无法在 Xenon ABI 下编译 | L5 | MPV 路线中止 | 按 M5 退出条件使用 Xbox360PlayerCore，不阻塞主线 |
 | FFmpeg 1.2 MOV/DASH 行为有限 | L4 | seek、时长和自然 EOF 异常 | 以 API duration 控制进度，先支持固定质量和基本播放 |
 | Xbox 360 内存/纹理预算不足 | L4 | 长时间运行崩溃 | bounded ring、纹理 LRU、限制并发和响应体 |
 | C++ 异常/线程 ABI 不兼容 | L4 | 链接或运行时失败 | 平台 worker、显式错误码、避免新增异常和桌面 libc++ 线程设施 |
 | Bilibili API/CDN 变化 | L3 | 播放或登录失效 | 封装 API、保留备用 URL、增加网络 smoke 测试 |
+| devkit/零售机行为差异 | L4 | devkit 验证通过的功能在零售机静默失效（如 SNL socket 标记，见 §10 2026-10-11） | 优先使用零售也支持的 API；每个网络/安全相关改动都要求零售实机复验 |
 | D3D9 UI 与视频渲染互相破坏状态 | L4 | 花屏或 Present 失败 | 明确 renderer ownership，统一 begin/end frame 和状态恢复 |
 
 ## 7. 每个阶段的交付物
@@ -620,7 +676,7 @@ OXDK/XDK
 
 | 能力 | Xbox 360 允许的替代实现 | 完成要求 |
 |---|---|---|
-| MPV 播放控制 | `Xbox360PlayerCore`、FFmpeg custom AVIO 或移植后的 MPV | 上层可完成播放、暂停、停止、seek、倍速、音量和进度更新 |
+| MPV 播放控制 | Xbox 360 libmpv 或 `Xbox360PlayerCore` | 上层可完成播放、暂停、停止、seek、倍速、音量和进度更新 |
 | MPV 事件 | Xbox 360 事件适配器 | 对 `VideoView`、Activity 和 `MPV_E` 提供等价状态 |
 | cpr/libcurl | XNet + libcurl、XboxTLS 或专用 HTTP transport | API、Cookie、WBI、Range、超时、取消和错误语义完整 |
 | borealis/NanoVG | Xbox 360 XDK D3D9 NanoVG backend | XML UI、字体、图片、裁剪、焦点和动画能力不因后端替换而消失 |
@@ -650,12 +706,91 @@ M0–M5 中可以有明确的临时限制，例如只支持匿名 480p、暂不�
 - 功能和现有 wiliwili 的目标子集一致；
 - Xbox 360 平台代码与通用 UI/API 解耦；
 - Desktop/Switch 构建不受影响；
-- MPV/ANGLE 作为可选研究线，而不是主线阻塞项。
+- MPV 作为优先主线；如果 M5 闸门失败，Xbox360PlayerCore 作为已记录的兜底实现。
 
-## 10. 下一步工作（2026-09-21）
+## 10. 下一步工作（最近更新 2026-10-11）
 
 ### 当前状态
-M3 编译和链接已完成。XEX 产出 `build-xbox360-m2/wiliwili`。
+M3 编译和链接、M4 首页网络/API、首次视频播放均已完成实机验证；M7 点播卡顿根因已定位并实机验证修复
+（2026-10-02）；**零售机视频流播放已修复并在 devkit + 零售两端实机验证（2026-10-11，见下）**。
+当前 XEX 产出于 `build-xbox360-local/wiliwili`（24,457,216 字节，162 objects，镜像 `0x1750000`）。
+下一步优先完成直播 round-6 验证与 M5/M6 完整验收闸门（暂停/seek/停止/EOF、20 次进出循环无泄漏）。
+
+#### 2026-09-30 播放链路实机验证记录
+
+- 视频详情页可以正常进入，并能通过现有 MPVCore 播放路径请求 Bilibili 视频。
+- FFmpeg 4.4.8 + MPV 0.36.0 已在真实 Xbox 360 XEX 中完成 HTTPS 视频加载和首次播放。
+- FFmpeg mbedTLS 后端的 `mbedtls_ctr_drbg_seed()` 已移到 `MBEDTLS_FS_IO` 条件块之外；Xbox 关闭文件系统证书加载时仍会正确初始化 CTR-DRBG。
+- 修复后未再出现 `mbedtls_internal_aes_encrypt` / `mbedtls_ctr_drbg_random` 引起的访问违规崩溃，播放已能开始。
+- 当前限制：视频播放极其卡顿；尚未完成稳定 480p、暂停/seek/停止/EOF、重复进入退出、长时间播放和资源泄漏验收。
+
+#### 2026-10-02 ~ 2026-10-04 性能排查与空实现审计更新
+
+- **2026-10-02 点播卡顿根因与修复**（四轮实机采集，`XBOX360_PLAYBACK_PERFORMANCE_PLAN.md` §11–§13）：
+  根因为非 1:1 几何下 mpv 默认 `SWS_LANCZOS`+HQ flags 在纯标量 sws 上的重采样
+  （1280x720→800x450 需 440ms/帧）；以 **1:1 surface** 为主对策、`sws-scaler=area` + `sws-fast`
+  为兜底，四场景矩阵中 720p 窗口化/全屏与 360p 窗口化均达 30fps 视频 + 53–60fps UI，已回写 M7。
+- **2026-10-03 ~ 10-04 直播卡顿排查**（性能计划 §14）：修复焦点切换 Hint 重建风暴（复用池实测通过）；
+  证伪堆锁单点持锁者假说；实锤主根因为 1080p 直播源 × 720p surface 上限导致每帧 254~359ms 重采样；
+  按“PSV 怎么处理 360 就怎么处理”决策将 surface 上限提至 3840x2160，round-6 已部署（15:12）待验证。
+- **2026-10-04 空实现审计复核**（`XBOX360_EMPTY_IMPL_AUDIT.md` §6）：A 类 5 条全部修复并通过
+  `build-xbox360-local3` 全量编译链接（424/424，162 objects）；C 类 4 条属实已处理、2 条复核时已过期；
+  B 类 12 条为有意保留的里程碑限制未动；另修复 `build_xbox360_local.sh` 的 `XDK_DIR`/`LLD`
+  两处从零构建缺陷。TLS CA bundle（M4）、崩溃转储、虚拟键盘、多手柄聚合等仍属未完成的里程碑项。
+
+#### 2026-10-11 零售机视频流播放修复：FFmpeg TCP socket SNL 标记（0x5801）
+
+**症状**：devkit 播放正常，零售机（retail console）视频页所有 m4s 流在 ~5s 后静默超时
+（`stream: Failed to open ...m4s` → `MPV ERROR: loading failed`），首页/API（curl 路径）正常。
+XBDM 日志中没有任何 socket 错误码——连接"看起来成功"但对端回复被丢弃。
+
+**根因**：Xbox 360 SNL（Secure Network Library）默认 secure 模式。
+
+- `XNET_STARTUP_BYPASS_SECURITY` 是 devkit 专属能力；零售 xnet.lib 静默忽略该标志
+  （XDK 文档 `xbox_secure_network_library_overview_xsnl.htm`、`xbox_xnetstartup_xsnl.htm`、
+  `Networking_Secure_IN_ADDRs.htm`）。
+- 即使在 devkit 上开启 bypass，未标记的 socket 也可能出现"连接成功但对端回复被静默丢弃"的行为。
+- curl 之所以在零售上一直正常，是因为 `third_party/curl/lib/connect.c:1331-1343` 在**每个新 socket
+  创建后**调用 `setsockopt(fd, SOL_SOCKET, 0x5801, ...)`（SNL "unencrypted" 每 socket 退出标记）。
+- FFmpeg 的 `libavformat/tcp.c` 从未设置该标记 → mpv 流 socket 在零售上被 SNL 静默拦截。
+
+**修复**（`third_party/ffmpeg-4.4.8/libavformat/tcp.c`，`customize_fd()` 增加 `_XBOX` 分支）：
+
+```c
+static void customize_fd(void *ctx, int fd)
+{
+    TCPContext *s = ctx;
+#if defined(_XBOX)
+    {
+        int xnet_opt = 1;
+        setsockopt(fd, SOL_SOCKET, 0x5801, (const char*)&xnet_opt, sizeof(xnet_opt));
+    }
+#endif /* _XBOX */
+    ... /* 原有 SO_RCVBUF/SO_SNDBUF/TCP_NODELAY 逻辑不变 */
+}
+```
+
+`customize_fd()` 由 `ff_socket()`（每个新建 TCP socket，含重试）和 `ff_connect_parallel()`
+（并发 connect）调用，覆盖所有流 socket 生命周期。
+
+**重要教训——不要同时设置 0x5802**：最初实现同时设置了 `0x5802`，结果在 devkit 上立即回归——
+所有 connect() 立即返回 `WSAEHOSTUNREACH (10065)`（`[XNET:1] Warning: connect failed: 10065`）。
+`0x5802` 在 bypass-security + 真实 IP 寻址组合下语义不明，**只设置 0x5801**，与 curl 的验证做法一致。
+（对象码验证：llvm-objdump 确认 `22529`（0x5801）存在、`22530`（0x5802）不存在。）
+
+**部署与验证**：
+
+- 增量重建 `libavformat.a` → 重链 XEX（`build-xbox360-local/wiliwili`，24,457,216 字节，162 objects，
+  重链日志 `logs/rebuild_x360_20261011b.log`）。
+- devkit（192.168.2.9）实机验证：视频缓冲 216 KB/s，`src 1280x720 -> dst 1280x720` 渲染正常，
+  截图 `logs/smoke_20261011_play.png`。
+- 零售机验证：720p 视频正常播放（用户协助测试）。
+- 零售机日志中的 `modload size=0x01750000`（新包镜像）可用于区分是否部署了带修复的 XEX
+  （旧包为 `0x013e0000`）；部署新包后若仍失败，先确认日志中的 modload size。
+
+**注意**：本修复只影响 FFmpeg/mpv 流 socket；首页/API 走 curl/cpr 路径（早已自带 0x5801），
+两者互不影响。若零售机出现首页加载失败，应先排查该机 DNS/网络环境（曾出现 B 站域名被解析到
+境外节点导致 curl error 56 的情况），而非回退本修复。
 
 2026-09-21 更新：`bili360-main` 的 `third_party/curl`（libcurl 7.37.1，含
 `config-xbox360.h` 和 `xbox360_stubs.c`）与 `third_party/mbedtls`
@@ -690,8 +825,8 @@ Xbox 360 分支优先使用仓库内副本，`BILI360_DIR` 环境变量仅作为
 ### M3 已完成
 
 上述实机验收已覆盖 AppletFrame 构造、字体渲染、XML 视图树、i18n 文案、NanoVG
-渲染、本地图片和 XInput 焦点导航。首页、设置页、搜索页、视频详情页以及网络/API
-接入仍属于后续 M4/M5 工作，不影响 M3 的离线 UI 验收结论。
+渲染、本地图片和 XInput 焦点导航。设置页、搜索页、视频详情页以及播放器仍属于后续
+M5 及更后续工作，不影响 M3 的离线 UI 验收结论。
 
 ### 已知后续事项
 - `std::terminate` 默认 handler 在本平台为空指针（OXDK libcxx_runtime.cpp 的
