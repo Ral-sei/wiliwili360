@@ -1,8 +1,183 @@
-<h1 align="center">WiliWili Xbox 360 移植版</h1>
+<h1 align="center">wiliwili Xbox 360 移植版</h1>
 
-🚧施工中
+<p align="center">
+  把 <a href="https://github.com/xfangfang/wiliwili">wiliwili</a> 带到 Xbox 360 的分支
+</p>
 
-使用 [OXDK](https://github.com/MrMilenko/OXDK) 编译
+<p align="center">
+  <a href="https://github.com/Ral-sei/wiliwili360/releases"><img src="https://img.shields.io/github/v/release/Ral-sei/wiliwili360?label=release" alt="release"></a>
+  <img src="https://img.shields.io/badge/-Xbox%20360-107C10?style=flat&logo=xbox" alt="Xbox 360">
+  <img src="https://img.shields.io/badge/toolchain-OXDK-blue" alt="OXDK">
+</p>
+
+
+## 下载
+
+前往 **[Releases](https://github.com/Ral-sei/wiliwili360/releases)** 下载。
+
+1. 下载最新 release 中的 Xbox 360 压缩包并解压；
+2. 将解压出的 `wiliwili.xex` 和 `resources` 目录放在**同一个目录**下；
+3. 把该目录放入主机硬盘（例如 `Hdd1:\wiliwili\`），通过 Aurora / XeXmenu / FSD 启动；
+
+配置文件与缓存位于 `game:\config\wiliwili\`，删除该目录可恢复默认设置。
+
+## 当前状态
+
+已经打通的链路：
+
+- **界面**：XDK D3D9 + NanoVG 渲染，XML 布局、字体、图片、焦点导航均可用；
+- **网络**：XNet + libcurl + mbedTLS，WBI 签名、首页推荐、搜索、视频详情、`playurl` 等接口可用；
+- **播放**：libmpv 0.36 + FFmpeg 4.4.8 软件渲染，YUV 由 GPU 上屏，点播 720p 实机可达约 30fps 视频 + 53–60fps UI；
+- **输入**：XInput 手柄导航与播放器按键；
+- **其它**：扫码登录、历史、收藏、直播、弹幕等页面已接入，部分功能仍在校验；
+
+已知限制（仍在补齐）：
+
+- DLNA 投屏不支持；
+- TLS 证书校验暂时关闭（尚未内置 CA bundle）；
+- XAV 硬件解码为实验功能且当前工具链不可用，默认关闭，仅软件解码；
+- 镜像画面、着色器、均衡器不可用。
+
+更多细节与实机记录见 [`docs/XBOX360_PORTING_PLAN.md`](docs/XBOX360_PORTING_PLAN.md) 及其配套文档。
+
+## 编译
+
+本移植使用 [OXDK](https://github.com/MrMilenko/OXDK) 提供的 Xenon ABI 工具链交叉编译，
+产物是 Xbox 360 可执行文件 **XEX**，不是 Windows 的 exe。
+
+### 依赖
+
+| 依赖 | 说明 |
+|---|---|
+| [OXDK](https://github.com/MrMilenko/OXDK) | 链接脚本、`oxdklink`、Xenon 运行库与 cshim |
+| Xbox 360 XDK | 需自行安装（不可再分发），提供 `xboxkrnl.lib`、`d3d9.lib` 等 |
+| OXDK LLVM | 带 Xenon ABI 补丁的 clang/lld，默认 `$HOME/oxdk-llvm/build` |
+| FFmpeg 4.4.8 | 已随仓库提供：`third_party/ffmpeg-4.4.8`（含 Xbox 补丁，已入库） |
+| cbffmpeg | 外部依赖树：`libmpv.a`、libass/libxml2、compat 层，以及 mpv 的构建脚本 |
+| 构建机 | Debian/Ubuntu 或 WSL（需要 `cmake`、`ninja`、`python3`、`make`） |
+
+> XDK 安装路径通常带空格，构建脚本会在构建目录里创建一个无空格软链，无需手动处理。
+
+### 准备 FFmpeg / libmpv
+
+`scripts/build_xbox360_linux.sh` **只编译 wiliwili 本体**，不会编译 FFmpeg 和 mpv。
+FFmpeg 源码已随仓库提供（`third_party/ffmpeg-4.4.8`），但静态库需要先构建一次；
+mpv 的源码与构建脚本在外部 cbffmpeg 仓库中。构建脚本会自动把 `FFMPEG_SRC` 指向
+`third_party/ffmpeg-4.4.8`、`FFMPEG_BUILD_DIR` 指向 `build/ffmpeg-x360-tls`，
+并在静态库缺失时打印下面的构建命令后退出。
+
+**1. FFmpeg 4.4.8**（源码已入库，只需构建一次）
+
+```sh
+sh scripts/ffmpeg_x360_configure_local.sh
+make -C build/ffmpeg-x360-tls -j$(nproc)
+```
+
+`third_party/ffmpeg-4.4.8` 已包含 `scripts/xbox360/ffmpeg/ffmpeg.patch` 的全部改动
+（零售机必需的 TCP socket SNL 标记 `0x5801`、XDK `hostent` 布局修正、mbedTLS 握手修复）。
+如果重新解压源码，需要重新打补丁：
+
+```sh
+cd third_party/ffmpeg-4.4.8
+patch -p1 < ../../scripts/xbox360/ffmpeg/ffmpeg.patch
+```
+
+**2. libmpv 0.36.0**（在 cbffmpeg 目录内构建）
+
+```sh
+cd /path/to/cbffmpeg
+scripts/mpv_x360_configure_p4.sh
+scripts/mpv_x360_build_p4.sh
+scripts/mpv_x360_compat_archive.sh
+```
+
+产物：
+
+```text
+cbffmpeg/build/mpv-x360-p4/libmpv.a
+cbffmpeg/build/compat-x360/libmpv_xbox360_compat.a
+cbffmpeg/build/libass-x360/lib/*.a
+cbffmpeg/build/libxml2-x360/lib/libxml2.a
+```
+
+仓库不包含 mpv 源码（`mpv-*` 仍在 `.gitignore` 中），构建由外部 cbffmpeg 提供。
+
+**3. 路径覆盖**
+
+| 变量 | 默认值 |
+|---|---|
+| `CBFFMPEG_DIR` | `../cbffmpeg` |
+| `FFMPEG_SRC` | `<repo>/third_party/ffmpeg-4.4.8` |
+| `FFMPEG_BUILD_DIR` | `<repo>/build/ffmpeg-x360-tls` |
+| `MPV_BUILD_DIR` | `$CBFFMPEG_DIR/build/mpv-x360-p4` |
+
+`scripts/ffmpeg_x360_configure_local.sh` 还支持 `FFMPEG_SRC`、`FFMPEG_BUILD`、
+`FFMPEG_COMPAT`、`OXDK`、`XDK`、`LLVM`、`PKG_CONFIG_LIBDIR` 等环境变量，
+也接受上面一键构建使用的 `OXDK_DIR`、`XDK_DIR`、`OXDK_LLVM` 命名
+（脚本内默认值是作者本机路径，务必按需覆盖）。它依赖
+`cbffmpeg/compat/xbox360` 与 libxml2 的 `.pc` 文件：
+
+```sh
+export FFMPEG_COMPAT=/path/to/cbffmpeg/compat/xbox360
+export PKG_CONFIG_LIBDIR=/path/to/cbffmpeg/build/libxml2-x360/lib/pkgconfig
+```
+
+### 构建
+
+确保上面的静态库已就绪：
+
+```sh
+git clone --recursive https://github.com/Ral-sei/wiliwili360.git
+cd wiliwili360
+
+export OXDK_DIR=/path/to/OXDK
+export XDK_DIR=/path/to/xdk360          # 含 include/xbox 的 XDK 根目录
+export OXDK_LLVM=$HOME/oxdk-llvm/build
+export CBFFMPEG_DIR=/path/to/cbffmpeg  # 需先构建出 P4 静态库
+
+scripts/build_xbox360_linux.sh
+```
+
+产物：`build-xbox360-linux/wiliwili`（XEX），完整日志在 `build-xbox360-linux/build.log`。
+
+`build_xbox360_linux.sh` 支持用环境变量覆盖路径与并行度：
+
+```sh
+BUILD_DIR=build-xbox360 JOBS=8 BUILD_TYPE=Release scripts/build_xbox360_linux.sh
+```
+
+### 手动构建
+
+```sh
+cmake -S . -B build-xbox360 -G Ninja \
+  -DPLATFORM_XBOX360=ON \
+  -DMPV_SW_RENDER=ON \
+  -DDISABLE_OPENCC=ON \
+  -DDISABLE_WEBP=ON \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build-xbox360 --target wiliwili -j$(nproc)
+```
+
+需要注意：
+
+- `LLD` 必须指向 cbffmpeg 的 `compat/xbox360/x360-ld.sh`（构建脚本会自动探测）。
+  它给 `ld.lld` 追加 `--wrap=getsockopt --wrap=WSAStartup`，否则 mpv 的 http/tcp 会以
+  10042/10057 全线失败；
+- FFmpeg/mpv 归档路径可用 `FFMPEG_BUILD_DIR`、`MPV_BUILD_DIR` 覆盖；任一归档缺失会直接
+  在 configure 阶段 `FATAL_ERROR`，不会链出一个缺符号的 XEX；
+- `third_party/` 已内置 Xbox 版 curl 与 mbedTLS，`BILI360_DIR` 仅作为回退。
+
+### 可选构建开关
+
+| 开关 | 默认 | 说明 |
+|---|---|---|
+| `-DXBOX360_XAV=ON` | OFF | 实验性 XAV 硬件解码路径，当前受工具链阻塞，不可用 |
+| `-DXBOX360_NANOVG_D3D9=ON` | OFF | 使用 vendored NanoVG D3D9 核心（默认用 borealis fork） |
+| `-DXBOX360_RUNTIME_PROBES=ON` | OFF | 打开 `[x360-*]` 运行时诊断日志，排障时使用 |
+
+更完整的依赖安装、故障排查与实机部署说明见
+[`docs/XBOX360_DEBIAN_BUILD.md`](docs/XBOX360_DEBIAN_BUILD.md)。
 
 ---
 

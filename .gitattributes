@@ -1,0 +1,8 @@
+# Vendored FFmpeg source and the Xbox 360 build helpers must keep their
+# original bytes: they are executed by /bin/sh inside WSL/Linux, where a CRLF
+# shebang fails with "bad interpreter".
+third_party/ffmpeg-4.4.8/** -text
+scripts/ffmpeg_x360_configure_local.sh -text
+scripts/x360-ld-fake.sh -text
+scripts/x360-pkg-config.sh -text
+scripts/build_xbox360_linux.sh -text

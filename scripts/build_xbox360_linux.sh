@@ -41,8 +41,42 @@ export LLVM_PREFIX=${LLVM_PREFIX:-${OXDK_LLVM}}
 export OXDK360_CACHE=${OXDK360_CACHE:-${BUILD_DIR}/oxdk-cache}
 export PATH="${OXDK_LLVM}/bin:/usr/bin:/bin:${PATH}"
 
+# oxdklink 只认 LLD 这个环境变量（oxdklink.py:32）。cbffmpeg 的 x360-ld.sh 在
+# ld.lld 后面追加 --wrap=getsockopt --wrap=WSAStartup：FFmpeg 判非阻塞 connect
+# 成败要问 SO_ERROR，XDK 的 XNet 不实现它；WSAStartup 那条则保证任何一次
+# WSAStartup 之前 XNet 已经以 XNET_STARTUP_BYPASS_SECURITY 启动。少了 LLD，
+# mpv 的 http/tcp 会以 10042/10057 全线失败。详见 cbffmpeg 的
+# compat/xbox360/x360-ld.sh 头注释。
+if [ -z "${LLD:-}" ]; then
+    CBFFMPEG_DIR=${CBFFMPEG_DIR:-${REPO}/../cbffmpeg}
+    export CBFFMPEG_DIR
+    if [ -x "${CBFFMPEG_DIR}/compat/xbox360/x360-ld.sh" ]; then
+        export LLD="${CBFFMPEG_DIR}/compat/xbox360/x360-ld.sh"
+    fi
+fi
+
+# FFmpeg 4.4.8 is vendored in third_party/ and tracked in git, so the source
+# tree never comes from an external checkout. Point both the source and the
+# build tree at this checkout and fail early with the exact commands when the
+# static libraries have not been built yet.
+export FFMPEG_SRC=${FFMPEG_SRC:-${REPO}/third_party/ffmpeg-4.4.8}
+export FFMPEG_BUILD_DIR=${FFMPEG_BUILD_DIR:-${REPO}/build/ffmpeg-x360-tls}
+[ -f "${FFMPEG_SRC}/configure" ] || {
+    echo "missing vendored FFmpeg source: ${FFMPEG_SRC}" >&2
+    exit 1
+}
+[ -f "${FFMPEG_BUILD_DIR}/libavformat/libavformat.a" ] || {
+    echo "FFmpeg static libraries not found in ${FFMPEG_BUILD_DIR}" >&2
+    echo "build them first:" >&2
+    echo "  FFMPEG_SRC=${FFMPEG_SRC} FFMPEG_BUILD=${FFMPEG_BUILD_DIR} \\" >&2
+    echo "    sh ${REPO}/scripts/ffmpeg_x360_configure_local.sh" >&2
+    echo "  make -C ${FFMPEG_BUILD_DIR} -j${JOBS}" >&2
+    exit 1
+}
+
 cmake -S "${REPO}" -B "${BUILD_DIR}" -G Ninja \
     -DPLATFORM_XBOX360=ON \
+    -DMPV_SW_RENDER=ON \
     -DDISABLE_OPENCC=ON \
     -DDISABLE_WEBP=ON \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
