@@ -14,6 +14,7 @@
         "low_quality": "低畫質解碼（以畫質為代價換取更低的功耗）",
         "in_memory_cache": "解码緩存",
         "hwdec": "硬體解碼",
+        "hwdec_experimental": "實驗功能：需要系統「選用媒體更新」編解碼套件，可能無法播放",
         "auto_play": "影片詳細頁直接播放",
         "auto_fullscreen": "進入播放頁後自動全屏",
         "exit_fullscreen": "播放結束時自動退出全屏",
@@ -484,6 +485,7 @@
   },
   "dialog": {
     "not_supported": "不支援此功能",
+    "ime_unavailable": "此版本暫不支援文字輸入",
     "quit_hint": "正在退出軟體..."
   }
 }

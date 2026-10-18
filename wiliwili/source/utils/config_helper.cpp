@@ -28,6 +28,11 @@
 #include "pystring.h"
 #include "utils/crash_helper.hpp"
 #include "utils/vibration_helper.hpp"
+#if defined(PLATFORM_XBOX360)
+#include "platform/xbox360/xbox360_network_runtime.hpp"
+// #11（§5.8-3）：mbedtls 私有分配池，定义于 third_party/mbedtls/library/platform.c
+extern "C" void x360_mbedtls_pool_init();
+#endif
 #include "utils/ban_list.hpp"
 #include "utils/string_helper.hpp"
 #include "utils/shortcut_helper.hpp"
@@ -109,12 +114,20 @@ static bool configFileExists(const std::string& path) {
 #define WILI_AUDIO_QUALITY_DEFAULT 4
 #define WILI_DNS_CACHE_TIMEOUT 3600000
 #else
+#if defined(PLATFORM_XBOX360)
+// Xbox 360: Xenon 软解上限 720p, 1080p+ 流解码必然卡顿 (性能计划 1080p 决策),
+// 因此默认与上限都限制在 720P (与 PSV 同一模式)。
+#define WILI_VIDEO_QUALITY_DEFAULT 64
+#define WILI_VIDEO_QUALITY_LANDSCAPE_MAX 64
+#define WILI_VIDEO_QUALITY_PORTRAIT_MAX 64
+#else
 // 默认清晰度 (116 为 1080P@60)
 #define WILI_VIDEO_QUALITY_DEFAULT 116
 // 横屏视频最高清晰度 (127 为 8K, 128 即无限制)
 #define WILI_VIDEO_QUALITY_LANDSCAPE_MAX 128
 // 竖屏视频最高清晰度
 #define WILI_VIDEO_QUALITY_PORTRAIT_MAX 128
+#endif
 // 默认窗口大小 (不配置 ui 缩放时的窗口大小)
 #define WILI_WINDOW_WIDTH_DEFAULT 1280
 #define WILI_WINDOW_HEIGHT_DEFAULT 720
@@ -1019,6 +1032,12 @@ void ProgramConfig::init() {
     brls::Logger::info("wiliwili {}", APPVersion::instance().git_tag);
     wiliwili::initCrashDump();
 
+#if defined(PLATFORM_XBOX360)
+    if (!xbox360::initNetwork()) {
+        brls::Logger::error("Xbox 360 network initialization failed");
+    }
+#endif
+
     // 在窗口大小改变时检查是否需要切换到置顶模式
     brls::Application::getWindowSizeChangedEvent()->subscribe([]() { ProgramConfig::instance().checkOnTop(); });
 
@@ -1032,6 +1051,15 @@ void ProgramConfig::init() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
 #endif
     cpr::async::startup(THREAD_POOL_MIN_THREAD_NUM, THREAD_POOL_MAX_THREAD_NUM, std::chrono::milliseconds(5000));
+#else
+    // Xbox uses the vendored curl/mbedTLS transport; initialize it after XNet
+    // and before any presenter can issue an HTTP request.
+    // #11（§5.8-3）：先建 mbedtls 私有分配池（4MB arena + size-class 空闲链），
+    // 让 ECDH 的微小 MPI 分配不再在 CRT 全局堆锁上排队（实测慢 calloc p50=20ms、
+    // max=60ms，21.6s 握手里 63s 耗在 68 字节分配上）。
+    x360_mbedtls_pool_init();
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    cpr::async::startup(THREAD_POOL_MIN_THREAD_NUM, THREAD_POOL_MAX_THREAD_NUM, 0);
 #endif
 
 #if defined(_WIN32) && !defined(PLATFORM_XBOX360)
@@ -1113,9 +1141,21 @@ void ProgramConfig::init() {
             VideoDetail::defaultQuality = WILI_VIDEO_QUALITY_DEFAULT;
         });
     BILI::setProxy(httpProxy, httpsProxy);
+#if defined(PLATFORM_XBOX360)
+    // The initial Xbox image has no deployed CA bundle.  Keep HTTPS usable
+    // until the bundle is packaged; mbedTLS still authenticates the channel
+    // when a CA store is supplied by a later resource update.
+    BILI::setTlsVerify(false);
+#else
     BILI::setTlsVerify(getBoolOption(SettingItem::TLS_VERIFY));
+#endif
+#if defined(PLATFORM_XBOX360)
+    BILI::setHttpTimeout(getSettingItem(SettingItem::HTTP_TIMEOUT, 60000));
+    BILI::setConnectionTimeout(getSettingItem(SettingItem::HTTP_CONNECTION_TIMEOUT, 10000));
+#else
     BILI::setHttpTimeout(getSettingItem(SettingItem::HTTP_TIMEOUT, 5000));
     BILI::setConnectionTimeout(getSettingItem(SettingItem::HTTP_CONNECTION_TIMEOUT, 0));
+#endif
     BILI::setDnsCacheTimeout(getSettingItem(SettingItem::HTTP_DNS_CACHE_TIMEOUT, WILI_DNS_CACHE_TIMEOUT));
 }
 
@@ -1182,6 +1222,11 @@ std::string ProgramConfig::getConfigDir() {
 }
 
 void ProgramConfig::exit(char* argv[]) {
+#if defined(PLATFORM_XBOX360)
+    cpr::async::cleanup();
+    curl_global_cleanup();
+    xbox360::shutdownNetwork();
+#endif
 #if !defined(PLATFORM_XBOX360)
     cpr::async::cleanup();
     curl_global_cleanup();

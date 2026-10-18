@@ -26,14 +26,17 @@ void MineHistoryRequest::requestHistoryVideoList() {
         return;
     }
     CHECK_AND_SET_REQUEST
+    ASYNC_RETAIN
     BILI::get_my_history(
         cursor,
-        [this](const bilibili::HistoryVideoResultWrapper &result) {
+        [ASYNC_TOKEN](const bilibili::HistoryVideoResultWrapper &result) {
+            ASYNC_RELEASE
             this->onHistoryList(result);
             this->cursor = result.cursor;
             UNSET_REQUEST
         },
-        [this](BILI_ERR) {
+        [ASYNC_TOKEN](BILI_ERR) {
+            ASYNC_RELEASE
             this->onError(error);
             UNSET_REQUEST
         });

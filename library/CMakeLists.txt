@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
 
-# add cpr
 if (PLATFORM_XBOX360)
     option(XBOX360_BUILD_CPR "Build CPR/libcurl while porting Xbox 360 TLS" OFF)
 else ()
@@ -80,6 +79,13 @@ if (PLATFORM_XBOX360 AND XBOX360_BUILD_MBEDTLS)
             message(FATAL_ERROR "Missing bili360 mbedTLS source: ${XBOX360_MBEDTLS_SOURCE}")
         endif ()
     endforeach ()
+    # 运行时诊断探针开关（与 toolchain.cmake 的 XBOX360_RUNTIME_PROBES 同步）。
+    # 关闭时 third_party 里的 [tls]/[curl] DbgPrint 探针编译为空，不再刷屏。
+    if (XBOX360_RUNTIME_PROBES)
+        set(X360_RUNTIME_PROBES_VALUE 1)
+    else ()
+        set(X360_RUNTIME_PROBES_VALUE 0)
+    endif ()
     add_library(xbox360_mbedtls STATIC ${XBOX360_MBEDTLS_SOURCES})
     target_include_directories(xbox360_mbedtls PUBLIC
         "${XBOX360_MBEDTLS_DIR}/include"
@@ -93,6 +99,7 @@ if (PLATFORM_XBOX360 AND XBOX360_BUILD_MBEDTLS)
         # snprintf. Point mbedTLS at the ABI-compatible XDK declaration.
         MBEDTLS_PLATFORM_STD_SNPRINTF=_snprintf
         MBEDTLS_CONFIG_FILE=\"mbedtls/config-xbox360.h\"
+        X360_RUNTIME_PROBES=${X360_RUNTIME_PROBES_VALUE}
     )
     target_compile_options(xbox360_mbedtls PRIVATE -w)
     list(APPEND APP_PLATFORM_LIB xbox360_mbedtls)
@@ -145,6 +152,7 @@ if (PLATFORM_XBOX360 AND XBOX360_BUILD_CURL)
     target_compile_definitions(xbox360_curl PRIVATE
         BUILDING_LIBCURL CURL_STATICLIB _XBOX
         _MSC_VER=1600 _INTEGRAL_MAX_BITS=64
+        X360_RUNTIME_PROBES=${X360_RUNTIME_PROBES_VALUE}
     )
     # The XDK also ships a share.h. Put curl's private headers first so
     # vtls.c resolves curl/lib/share.h rather than the unrelated XDK header.
@@ -158,6 +166,22 @@ if (PLATFORM_XBOX360 AND XBOX360_BUILD_CURL)
     list(APPEND APP_PLATFORM_INCLUDE "${XBOX360_CURL_DIR}/include")
     set(APP_PLATFORM_LIB ${APP_PLATFORM_LIB} PARENT_SCOPE)
     set(APP_PLATFORM_INCLUDE ${APP_PLATFORM_INCLUDE} PARENT_SCOPE)
+endif ()
+
+if (PLATFORM_XBOX360 AND NOT XBOX360_BUILD_CPR)
+    file(GLOB XBOX360_CPR_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/cpr/cpr/*.cpp")
+    list(FILTER XBOX360_CPR_SOURCES EXCLUDE REGEX "/async\\.cpp$")
+    list(FILTER XBOX360_CPR_SOURCES EXCLUDE REGEX "/threadpool\\.cpp$")
+    list(FILTER XBOX360_CPR_SOURCES EXCLUDE REGEX "/multiperform\\.cpp$")
+    add_library(cpr STATIC ${XBOX360_CPR_SOURCES})
+    add_library(cpr::cpr ALIAS cpr)
+    target_include_directories(cpr PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/cpr/include")
+    target_link_libraries(cpr PUBLIC xbox360_curl)
+    target_compile_definitions(cpr PRIVATE CPR_CURL_NOSIGNAL NONET)
+    target_compile_options(cpr PRIVATE -fexceptions
+        "-include${CMAKE_CURRENT_SOURCE_DIR}/cpr/include/cpr/singleton.h"
+        "-include${CMAKE_CURRENT_SOURCE_DIR}/cpr/include/cpr/threadpool.h")
 endif ()
 
 if (PLATFORM_XBOX360)

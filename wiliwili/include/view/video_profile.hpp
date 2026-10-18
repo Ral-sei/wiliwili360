@@ -42,6 +42,7 @@ public:
     BRLS_BIND(brls::Label, labelVideoDrop, "profile/video/drop");
     BRLS_BIND(brls::Label, labelVideoSync, "profile/video/avsync");
 
+    BRLS_BIND(brls::Label, labelAudioOutput, "profile/audio/output");
     BRLS_BIND(brls::Label, labelAudioChannel, "profile/audio/channel");
     BRLS_BIND(brls::Label, labelAudioCodec, "profile/audio/codec");
     BRLS_BIND(brls::Label, labelAudioSampleRate, "profile/audio/sample");

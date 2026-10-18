@@ -1,108 +1,59 @@
-// M3 linker shims: provide every undefined symbol the Xbox 360 build needs
-// to produce a linkable XEX, without yet implementing the real backends.
+// Xbox 360 linker shims for platform gaps that are still absent from XDK.
+
+#include <cpr/multiperform.h>
+#include <cpr/session.h>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+namespace cpr {
+MultiPerform::MultiPerform() = default;
+MultiPerform::~MultiPerform() = default;
+
+// Xbox: curl_multi_poll() is not part of the Xenon curl build, so upstream
+// cpr/multiperform.cpp is filtered out of the Xbox cpr target (see
+// library/CMakeLists.txt) and these two members are the only definitions
+// the linker sees. Run the queued sessions one at a time instead of through a
+// multi handle — callers (BilibiliClient::get_pgc_all_filter) only need the
+// responses back in AddSession order, not concurrency.
+//
+// Do NOT set Session::isUsedInMultiPerform: it makes Session::Get() bail out
+// in DoEasyPerform(), which is meant for handles already attached to a multi
+// handle. We go through the ordinary easy path instead.
+void MultiPerform::AddSession(std::shared_ptr<Session>& session, HttpMethod method) {
+    if (method == HttpMethod::DOWNLOAD_REQUEST) is_download_multi_perform = true;
+    sessions_.emplace_back(session, method);
+}
+
+std::vector<Response> MultiPerform::Get() {
+    // Upstream Get() re-prepares every queued session as GET before running
+    // them, regardless of the method passed to AddSession().
+    std::vector<Response> responses;
+    responses.reserve(sessions_.size());
+    for (auto& pair : sessions_) {
+        pair.second = HttpMethod::GET_REQUEST;
+        responses.push_back(pair.first->Get());
+    }
+    return responses;
+}
+} // namespace cpr
+
+namespace std { namespace __1 {
+unsigned long stoul(const string& s, size_t* idx, int base) {
+    const char* begin = s.c_str(); char* end = nullptr;
+    unsigned long value = strtoul(begin, &end, base);
+    if (idx) *idx = static_cast<size_t>(end - begin);
+    return value;
+}
+} }
+
+extern "C" void __cxa_rethrow() { std::abort(); }
 //
 // Sections 1-3 include real headers and provide stub method bodies.
 // Sections 4-8 provide raw symbols for C/library functions.
 
 // ============================================================================
-// 1. cpr stubs — HTTP transport (M4 territory)
-// ============================================================================
-#include <cpr/session.h>
-#include <cpr/multiperform.h>
-#include <cpr/curlholder.h>
-#include <cpr/curlmultiholder.h>
-#include <cpr/parameters.h>
-#include <cpr/payload.h>
-#include <cpr/proxies.h>
-#include <cpr/cookies.h>
-#include <cpr/proxyauth.h>
-#include <cpr/util.h>
-#include <cpr/curl_container.h>
-#include <memory>
-
-namespace cpr {
-
-// CurlHolder
-CurlHolder::CurlHolder() {}
-CurlHolder::~CurlHolder() {}
-
-// CurlMultiHolder
-CurlMultiHolder::CurlMultiHolder() {}
-CurlMultiHolder::~CurlMultiHolder() {}
-
-// Session
-Session::Session() {}
-std::shared_ptr<Session> Session::GetSharedPtrFromThis() { return nullptr; }
-std::shared_ptr<CurlHolder> Session::GetCurlHolder() { return std::make_shared<CurlHolder>(); }
-void Session::SetUrl(const Url&) {}
-void Session::SetHeader(const Header&) {}
-void Session::SetBody(Body&&) {}
-void Session::SetBody(const Body&) {}
-void Session::SetPayload(Payload&&) {}
-void Session::SetPayload(const Payload&) {}
-void Session::SetParameters(const Parameters&) {}
-void Session::SetParameters(Parameters&&) {}
-void Session::SetCookies(const Cookies&) {}
-void Session::SetProxies(Proxies&&) {}
-void Session::SetProxies(const Proxies&) {}
-void Session::SetTimeout(const Timeout&) {}
-void Session::SetConnectTimeout(const ConnectTimeout&) {}
-void Session::SetRange(const Range&) {}
-void Session::SetVerifySsl(const VerifySsl&) {}
-Response Session::Get() { return {}; }
-Response Session::Post() { return {}; }
-
-// MultiPerform
-MultiPerform::MultiPerform() = default;
-MultiPerform::~MultiPerform() = default;
-std::vector<Response> MultiPerform::Get() { return {}; }
-void MultiPerform::AddSession(std::shared_ptr<Session>&, HttpMethod) {}
-
-// EncodedAuthentication
-EncodedAuthentication::~EncodedAuthentication() noexcept = default;
-
-// Parameters
-Parameters::Parameters(const std::initializer_list<Parameter>&) {}
-
-// Payload
-Payload::Payload(const std::initializer_list<Pair>&) {}
-
-// Proxies
-Proxies::Proxies(const std::initializer_list<std::pair<const std::string, std::string>>&) {}
-
-// Cookie / Cookies
-const std::string Cookie::GetName() const { return {}; }
-const std::string Cookie::GetValue() const { return {}; }
-void Cookies::emplace_back(const Cookie&) {}
-Cookies::const_iterator Cookies::begin() const { return {}; }
-Cookies::const_iterator Cookies::end() const { return {}; }
-
-// util
-namespace util {
-std::string urlEncode(const std::string&) { return {}; }
-}
-
-// CaseInsensitiveCompare
-bool CaseInsensitiveCompare::operator()(const std::string&, const std::string&) const noexcept { return false; }
-
-// CurlContainer template definitions (must appear before explicit instantiation)
-template <class T>
-void CurlContainer<T>::Add(const T&) {}
-
-template <class T>
-void CurlContainer<T>::Add(const std::initializer_list<T>&) {}
-
-template <class T>
-const std::string CurlContainer<T>::GetContent(const CurlHolder&) const { return {}; }
-
-// CurlContainer explicit instantiations
-template class CurlContainer<Pair>;
-template class CurlContainer<Parameter>;
-
-} // namespace cpr
-
-// ============================================================================
-// 2. std::__fs::filesystem — MOVED
+// std::__fs::filesystem — implemented in xbox360_filesystem.cpp.
 // ============================================================================
 // The placeholder bodies that used to live here broke i18n locale discovery
 // and config saving at runtime. Real implementations backed by the XDK Win32
@@ -112,13 +63,27 @@ template class CurlContainer<Parameter>;
 // 3. std::chrono stubs
 // ============================================================================
 #include <chrono>
+#include <xtl.h>
 
 namespace std {
 namespace __1 {
 namespace chrono {
 
 system_clock::time_point system_clock::now() noexcept {
-    return time_point(duration(0));
+    FILETIME fileTime{};
+    GetSystemTimeAsFileTime(&fileTime);
+    ULARGE_INTEGER value{};
+    value.LowPart = fileTime.dwLowDateTime;
+    value.HighPart = fileTime.dwHighDateTime;
+
+    // FILETIME is measured in 100 ns intervals since 1601-01-01 UTC.
+    constexpr unsigned long long unixEpoch = 116444736000000000ULL;
+    if (value.QuadPart <= unixEpoch)
+        return time_point(duration(0));
+
+    const unsigned long long unix100ns = value.QuadPart - unixEpoch;
+    const auto micros = std::chrono::microseconds(static_cast<long long>(unix100ns / 10));
+    return time_point(std::chrono::duration_cast<duration>(micros));
 }
 
 system_clock::time_point system_clock::from_time_t(time_t t) noexcept {
@@ -204,14 +169,25 @@ static string __uint_to_str(unsigned long long v) {
     return string(buf);
 }
 
+// %g matches libc++'s own to_string() formatting closely enough for the
+// diagnostics that consume these (mpv property readouts, cache rates).
+static string __float_to_str(double v) {
+    char buf[64];
+    int n = std::snprintf(buf, sizeof(buf), "%g", v);
+    if (n < 0) return string("0");
+    if ((size_t)n >= sizeof(buf)) n = (int)sizeof(buf) - 1;
+    buf[n] = '\0';
+    return string(buf);
+}
+
 string to_string(int v)                     { return __int_to_str(v); }
 string to_string(unsigned v)                { return __uint_to_str(v); }
 string to_string(long v)                    { return __int_to_str(v); }
 string to_string(unsigned long v)           { return __uint_to_str(v); }
 string to_string(long long v)               { return __int_to_str(v); }
 string to_string(unsigned long long v)      { return __uint_to_str(v); }
-string to_string(float)                     { return string("0"); }
-string to_string(double)                    { return string("0"); }
+string to_string(float v)                   { return __float_to_str((double)v); }
+string to_string(double v)                  { return __float_to_str(v); }
 
 } // namespace __1
 } // namespace std
@@ -295,23 +271,5 @@ extern "C" unsigned char m3_bit_scan_reverse(unsigned long* index,
 
 extern "C" void* __cxa_bad_typeid() { std::abort(); }
 
-// 8. curl stubs (M4 territory)
-// ============================================================================
-// cpr headers already pull in curl/curl.h with real types; just define the functions.
-
-extern "C" {
-
-CURL*       curl_easy_init(void)                         { return nullptr; }
-CURLcode    curl_easy_setopt(CURL*, CURLoption, ...)     { return CURLE_FAILED_INIT; }
-CURLcode    curl_easy_perform(CURL*)                     { return CURLE_FAILED_INIT; }
-void        curl_easy_cleanup(CURL*)                     {}
-CURLcode    curl_easy_getinfo(CURL*, CURLINFO, ...)      { return CURLE_FAILED_INIT; }
-
-struct curl_slist* curl_slist_append(struct curl_slist*, const char*) { return nullptr; }
-void curl_slist_free_all(struct curl_slist*) {}
-
-CURLSH*     curl_share_init(void)                                  { return nullptr; }
-CURLSHcode  curl_share_setopt(CURLSH*, CURLSHoption, ...)         { return CURLSHE_OK; }
-CURLSHcode  curl_share_cleanup(CURLSH*)                            { return CURLSHE_OK; }
-
-} // extern "C"
+// curl is provided by the Xbox 360 libcurl target in CMake.  The M3 stubs
+// were intentionally removed once the real transport became available.

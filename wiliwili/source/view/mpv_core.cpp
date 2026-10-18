@@ -5,6 +5,9 @@
 #include <cstdlib>
 #include <clocale>
 #include <cmath>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <pystring.h>
 #include <borealis/core/thread.hpp>
 #include <borealis/core/application.hpp>
@@ -13,6 +16,191 @@
 #include "utils/number_helper.hpp"
 #include "utils/crash_helper.hpp"
 #include "view/mpv_core.hpp"
+
+#if defined(PLATFORM_XBOX360)
+extern "C" void xbox360_pthread_set_bind_spread(int enable);
+#include <borealis/platforms/xbox360/xbox360_yuv.hpp>
+#include <borealis/platforms/xbox360/xbox360_video.hpp>
+#if X360_XAV
+#include <borealis/platforms/xbox360/xbox360_xav.hpp>
+#endif
+#include <borealis/platforms/xbox360/xbox360_perf.hpp>
+
+// Cheap breakdown of where a frame goes, so regressions can be attributed to
+// decoding/conversion, texture upload or UI.  Logged every 60 samples.
+//
+// Timing is brls::xbox360perf (QueryPerformanceCounter): brls::getCPUTimeUsec()
+// is only GetTickCount() on this platform and std::chrono::system_clock is
+// ~1ms too, both of which made every sub-millisecond sample read back as zero.
+namespace {
+struct X360PerfProbe {
+    double totalMs = 0;
+    int samples    = 0;
+    std::uint64_t lastFlush = 0;
+    brls::xbox360perf::Ring ring;
+    void add(double ms) {
+        totalMs += ms;
+        samples++;
+        ring.add((float)ms);
+    }
+    void flush(const char *name) {
+#if !X360_RUNTIME_PROBES
+        // 探针关闭：只累计不输出（add() 仍记账，几乎零成本）。
+        (void)name;
+        return;
+#endif
+        if (samples == 0) return;
+        // Flush every 2s of wall time as well as every 60 samples: at 2 fps
+        // waiting for 60 samples meant the number never showed up during a
+        // short playback window, which is exactly when it is needed.
+        const std::uint64_t now = brls::xbox360perf::nowUsec();
+        if (lastFlush == 0) {
+            lastFlush = now;
+            return;
+        }
+        if (now - lastFlush < 2000000 && samples < 60) return;
+        brls::Logger::info("[x360-perf] {}: {:.2f} ms avg, p95 {:.2f}, max {:.2f} over {} samples", name,
+                           totalMs / samples, ring.quantile(0.95f), ring.maxMs(), samples);
+        totalMs   = 0;
+        samples   = 0;
+        lastFlush = now;
+        ring.reset();
+    }
+};
+X360PerfProbe x360_mpRender;   // mpvRenderContextRender: swscale conversion + plane clear
+X360PerfProbe x360_draw;       // Xbox360YUVRenderer::draw on the UI thread
+
+// setFrameSize counters (plan P0 / §9.3): distinguishes "the video rect was
+// re-validated" from "the render surface really changed size".  A size-change
+// rate close to the UI frame rate means the rect is oscillating every frame,
+// which would re-run the synchronous mpv render (and possibly realloc) at
+// frame rate.  Logged only on change (throttled) plus one summary line per
+// window, never per frame.
+struct X360SizeProbe {
+    std::uint32_t calls   = 0;
+    std::uint32_t changes = 0;
+    std::uint32_t allocs  = 0;
+    std::uint64_t lastFlush = 0;
+    void flush(int w, int h, std::size_t pitch) {
+#if !X360_RUNTIME_PROBES
+        (void)w;
+        (void)h;
+        (void)pitch;
+        return;
+#endif
+        if (calls == 0) return;
+        const std::uint64_t now = brls::xbox360perf::nowUsec();
+        if (lastFlush == 0) {
+            lastFlush = now;
+            return;
+        }
+        if (now - lastFlush < 2000000) return;
+        brls::Logger::info(
+            "[x360-perf] setFrameSize: {} calls, {} size changes, {} surface allocs, surface {}x{} pitch {}",
+            calls, changes, allocs, w, h, pitch);
+        calls   = 0;
+        changes = 0;
+        allocs  = 0;
+        lastFlush = now;
+    }
+};
+X360SizeProbe x360_size;
+
+// Periodic mpv-side frame accounting (P0): separates "decoder/vo produced too
+// few frames" from "render was slow".  getDouble/getInt read mpv properties
+// synchronously; six reads every 2s is negligible next to the render cost.
+struct X360MpvStatsProbe {
+    std::uint64_t lastFlush = 0;
+    void flush() {
+#if !X360_RUNTIME_PROBES
+        return;
+#endif
+        const std::uint64_t now = brls::xbox360perf::nowUsec();
+        if (lastFlush == 0) {
+            lastFlush = now;
+            return;
+        }
+        if (now - lastFlush < 2000000) return;
+        lastFlush = now;
+        auto& core = MPVCore::instance();
+        // rd = demuxer 拉流速度：配合 est-vf 崩塌 + cache 归零判定"网络饥饿"
+        // （与主线程冻结是两种病：rd≈0 是拉不动流，主线程没卡也照样花屏音爆）。
+        brls::Logger::info(
+            "[x360-mpv] fps: container {:.2f} est-vf {:.2f} | drops: vo {} decoder {} vo-delayed {}"
+            " | cache {:.1f}s rd {:.2f} MB/s",
+            core.getDouble("container-fps"), core.getDouble("estimated-vf-fps"),
+            core.getInt("frame-drop-count"), core.getInt("decoder-frame-drop-count"),
+            core.getInt("vo-delayed-frame-count"), core.getDouble("demuxer-cache-duration"),
+            core.getDouble("demuxer-cache-speed") / 1048576.0);
+    }
+};
+X360MpvStatsProbe x360_mpvStats;
+
+// Render-pipeline accounting (60fps output investigation): separates
+// "mpv rarely signals an update" (vo_libmpv pacing) from "the main thread
+// starves the render task" (sync-queue latency / coalescing).
+// onUpdate/coalesced/tasksQueued/queueMs are written from mpv's internal
+// thread; the rest only from the main thread (sync lambda + draw flush).
+// Relaxed atomics: a report line may read one increment stale, harmless.
+struct X360RenderPipeProbe {
+    // mpv internal thread:
+    std::atomic<std::uint32_t> onUpdate{0};    // update callback invoked
+    std::atomic<std::uint32_t> coalesced{0};   // render already pending, merged
+    std::atomic<std::uint32_t> tasksQueued{0}; // sync task submitted
+    std::atomic<std::uint32_t> queueMs{0};     // enqueue time (ms), 0 = none
+    // main thread:
+    std::uint32_t tasksRun     = 0; // sync task executed
+    std::uint32_t skipNoPixels = 0; // task ran but pixels not ready yet
+    std::uint32_t updateFrame  = 0; // MPV_RENDER_UPDATE_FRAME seen
+    std::uint32_t updateNone   = 0; // update without a new frame
+    std::uint32_t renders      = 0; // mpvRenderContextRender called
+    double latTotalMs          = 0; // queue latency (enqueue -> task start)
+    double latMaxMs            = 0;
+    std::uint32_t latCount     = 0;
+    std::uint64_t lastFlush    = 0;
+
+    void noteLatency(std::uint32_t enqMs) {
+        if (enqMs == 0) return;
+        // 32-bit ms wraps after ~49 days; unsigned delta stays correct for
+        // any realistic queue latency.
+        const double ms = (double)((std::uint32_t)(brls::xbox360perf::nowUsec() / 1000) - enqMs);
+        latTotalMs += ms;
+        latCount++;
+        if (ms > latMaxMs) latMaxMs = ms;
+    }
+
+    void flush() {
+#if !X360_RUNTIME_PROBES
+        return;
+#endif
+        const std::uint64_t now = brls::xbox360perf::nowUsec();
+        if (lastFlush == 0) {
+            lastFlush = now;
+            return;
+        }
+        if (now - lastFlush < 2000000) return;
+        lastFlush = now;
+        // 判读：update≈renders ≈ 片源帧率 → mpv 侧不缺帧；
+        // update 高而 renders 低 → 主线程消费慢（看 queue 延迟）或 flags 缺帧；
+        // update 本身就低 → vo_libmpv pacing（调 mpv 选项，与线程无关）。
+        brls::Logger::info(
+            "[x360-mpv] render-pipe: update {} coalesced {} queued {} run {} no-pix {} | "
+            "flags frame/none {}/{} renders {} | queue {:.2f} ms avg, max {:.2f} (n {})",
+            onUpdate.exchange(0), coalesced.exchange(0), tasksQueued.exchange(0),
+            tasksRun, skipNoPixels, updateFrame, updateNone, renders,
+            latCount ? latTotalMs / latCount : 0.0, latMaxMs, latCount);
+        tasksRun = skipNoPixels = updateFrame = updateNone = renders = 0;
+        latTotalMs = latMaxMs = 0;
+        latCount              = 0;
+    }
+};
+X360RenderPipeProbe x360_pipe;
+
+inline double x360NowMs() {
+    return (double)brls::xbox360perf::nowUsec() / 1000.0;
+}
+} // namespace
+#endif
 
 #ifdef MPV_BUNDLE_DLL
 mpvSetOptionStringFunc mpvSetOptionString;
@@ -37,6 +225,7 @@ mpvRenderContextReportSwapFunc mpvRenderContextReportSwap;
 mpvRenderContextUpdateFunc mpvRenderContextUpdate;
 mpvRenderContextFreeFunc mpvRenderContextFree;
 mpvClientApiVersionFunc mpvClientApiVersion;
+mpvRequestLogMessagesFunc mpvRequestLogMessages;
 #endif
 
 #ifdef MPV_USE_FB
@@ -185,6 +374,7 @@ static void *get_proc_address(void *unused, const char *name) {
 #endif
 
 static inline float aspectConverter(const std::string &value) {
+#if defined(__cpp_exceptions)
     try {
         if (value.empty()) {
             return -1;
@@ -200,37 +390,115 @@ static inline float aspectConverter(const std::string &value) {
     } catch (const std::exception &e) {
         return -1;
     }
+#else
+    // Xbox 360/OXDK 没有 unwinder：builtins.c 的 __cxa_throw 是 for(;;)，throw
+    // 出去就再也回不来，所以 std::stof 换成不抛异常的 strtof。语义对齐 std::stof：
+    // 跳过前导空白、允许尾部残渣（"12abc" → 12）、转换不了或 ERANGE → 返回失败。
+    auto stofSafe = [](const std::string &s, float &out) -> bool {
+        char *end    = nullptr;
+        errno        = 0;
+        out          = strtof(s.c_str(), &end);
+        return end != s.c_str() && errno != ERANGE;
+    };
+    if (value.empty()) {
+        return -1;
+    } else if (pystring::count(value, ":")) {
+        // 比例模式
+        auto num = pystring::split(value, ":");
+        if (num.size() != 2) return -1;
+        float lhs = 0, rhs = 0;
+        if (!stofSafe(num[0], lhs) || !stofSafe(num[1], rhs)) return -1;
+        return lhs / rhs;
+    } else {
+        // 纯数字
+        float parsed = 0;
+        if (!stofSafe(value, parsed)) return -1;
+        return parsed;
+    }
+#endif
 }
 
 void MPVCore::on_update(void *self) {
-    brls::sync([]() {
-        uint64_t flags = mpvRenderContextUpdate(MPVCore::instance().getContext());
+    auto *core = static_cast<MPVCore *>(self);
+    if (!core) return;
+#if defined(PLATFORM_XBOX360)
+    x360_pipe.onUpdate.fetch_add(1, std::memory_order_relaxed);
+#endif
+#if defined(MPV_SW_RENDER)
+    if (core->renderPending.exchange(true, std::memory_order_acq_rel)) {
+#if defined(PLATFORM_XBOX360)
+        x360_pipe.coalesced.fetch_add(1, std::memory_order_relaxed);
+#endif
+        return;
+    }
+#endif
+#if defined(PLATFORM_XBOX360)
+    x360_pipe.tasksQueued.fetch_add(1, std::memory_order_relaxed);
+    x360_pipe.queueMs.store((std::uint32_t)(brls::xbox360perf::nowUsec() / 1000),
+                            std::memory_order_relaxed);
+#endif
+    brls::sync([core]() {
+#if defined(PLATFORM_XBOX360)
+        x360_pipe.tasksRun++;
+        x360_pipe.noteLatency(x360_pipe.queueMs.exchange(0, std::memory_order_relaxed));
+#endif
+#if defined(MPV_SW_RENDER)
+        core->renderPending.store(false, std::memory_order_release);
+#endif
+        if (!core->mpv_context || !core->mpv) return;
+        uint64_t flags = mpvRenderContextUpdate(core->mpv_context);
+#if defined(PLATFORM_XBOX360)
+        if (flags & MPV_RENDER_UPDATE_FRAME)
+            x360_pipe.updateFrame++;
+        else
+            x360_pipe.updateNone++;
+#endif
 #if defined(MPV_NO_FB) || defined(BOREALIS_USE_DEKO3D) || defined(BOREALIS_USE_D3D11)
         // 直接绘制到屏幕上，需要屏幕每刷新一次绘制一次，在 MPVCore 的绘制函数内部处理
         (void)flags;
 #else
         // 绘制到 FBO、纹理、buffer...上，在主循环结尾进行绘制，MPVCore 的绘制函数内直接绘制对应的 FBO、纹理、buffer...
-        MPVCore::instance().redraw = flags & MPV_RENDER_UPDATE_FRAME;
-        if (MPVCore::instance().redraw) {
+        core->redraw = flags & MPV_RENDER_UPDATE_FRAME;
+        if (core->redraw) {
 #ifdef MPV_SW_RENDER
-            if (!MPVCore::instance().pixels) return;
-            mpvRenderContextRender(MPVCore::instance().mpv_context, MPVCore::instance().mpv_params);
-            mpvRenderContextReportSwap(MPVCore::instance().mpv_context);
+            if (!core->pixels) {
+#if defined(PLATFORM_XBOX360)
+                x360_pipe.skipNoPixels++;
+#endif
+                return;
+            }
+#if defined(PLATFORM_XBOX360)
+            const double probeStart = x360NowMs();
+            x360_pipe.renders++;
+#endif
+            int renderResult = mpvRenderContextRender(core->mpv_context, core->mpv_params);
+#if defined(PLATFORM_XBOX360)
+            x360_mpRender.add(x360NowMs() - probeStart);
+            x360_mpRender.flush("mpv render call (swscale+clear)");
+#endif
+            if (renderResult < 0) {
+                brls::Logger::error("mpv software render failed: {}", renderResult);
+                core->redraw = false;
+                return;
+            }
+            mpvRenderContextReportSwap(core->mpv_context);
+            core->redraw = true;
 #else
-            mpvRenderContextRender(MPVCore::instance().mpv_context, MPVCore::instance().mpv_params);
+            mpvRenderContextRender(core->mpv_context, core->mpv_params);
 #ifdef BOREALIS_USE_OPENGL
-            glBindFramebuffer(GL_FRAMEBUFFER, MPVCore::instance().default_framebuffer);
+            glBindFramebuffer(GL_FRAMEBUFFER, core->default_framebuffer);
             glViewport(0, 0, (GLsizei)brls::Application::windowWidth, (GLsizei)brls::Application::windowHeight);
 #endif
-            mpvRenderContextReportSwap(MPVCore::instance().mpv_context);
+            mpvRenderContextReportSwap(core->mpv_context);
 #endif
         }
 #endif
-    });
+    }, "mpv-rend");
 }
 
 void MPVCore::on_wakeup(void *self) {
-    brls::sync([]() { MPVCore::instance().eventMainLoop(); });
+    // tag "mpv-wk"：[stall-task] 看门狗 + 慢任务日志都能认出事件循环任务
+    brls::sync([]() { MPVCore::instance().eventMainLoop(); }, "mpv-wk");
 }
 
 #if defined(MPV_BUNDLE_DLL)
@@ -259,6 +527,7 @@ void initMpvProc(Module dll, fnGetProcAddress pGetProcAddress) {
         (mpvRenderContextSetUpdateCallbackFunc)pGetProcAddress(dll, "mpv_render_context_set_update_callback");
     mpvRenderContextReportSwap = (mpvRenderContextReportSwapFunc)pGetProcAddress(dll, "mpv_render_context_report_swap");
     mpvClientApiVersion        = (mpvClientApiVersionFunc)pGetProcAddress(dll, "mpv_client_api_version");
+    mpvRequestLogMessages      = (mpvRequestLogMessagesFunc)pGetProcAddress(dll, "mpv_request_log_messages");
 }
 #endif
 
@@ -286,10 +555,16 @@ MPVCore::MPVCore() {
     // Destroy mpv when application exit
     brls::Application::getExitDoneEvent()->subscribe([this]() {
         this->clean();
+#if defined(PLATFORM_XBOX360) && X360_XAV
+        // XAV must be shut down before the D3D device is destroyed.
+        brls::Xbox360Xav::instance().shutdown();
+#endif
 #ifdef MPV_SW_RENDER
-        if (pixels) {
-            free(pixels);
-            pixels             = nullptr;
+        if (pixels_storage) {
+            free(pixels_storage);
+            pixels_storage = nullptr;
+            pixels         = nullptr;
+            pixels_bytes   = 0;
             mpv_params[3].data = nullptr;
         }
 #endif
@@ -297,6 +572,11 @@ MPVCore::MPVCore() {
 }
 
 void MPVCore::init() {
+#if defined(PLATFORM_XBOX360)
+    // Spread FFmpeg/mpv pthread workers across the three Xenon cores before
+    // mpv starts creating decoder threads.
+    xbox360_pthread_set_bind_spread(1);
+#endif
     setlocale(LC_NUMERIC, "C");
     this->mpv = mpvCreate();
     if (!mpv) {
@@ -375,6 +655,25 @@ void MPVCore::init() {
 
     // Fix vo_wait_frame() cannot be wakeup
     mpvSetOptionString(mpv, "video-latency-hacks", "yes");
+#elif defined(PLATFORM_XBOX360)
+    // Six logical hardware threads are available; cbffmpeg's pthread shim
+    // spreads the workers across physical cores and then SMT siblings.
+    mpvSetOptionString(mpv, "vd-lavc-threads", "6");
+    // NOTE: "framedrop=decoder+vo" was tried here and reverted: decoder-side
+    // NONREF skipping engaged (decoder drops ~30/s, est-vf 60->31) but delay
+    // still drifted +0.1~0.16 s/s, VO drop-gate kept the client at ~5.5Hz,
+    // and 720p30 playback became visibly janky. Do not re-enable without a
+    // new plan.
+    // P0 round 2 (XBOX360_PLAYBACK_PERFORMANCE_PLAN.md §12): mpv's sws
+    // defaults are LANCZOS + full-chroma HQ flags, and this ffmpeg build has
+    // no AltiVec (HAVE_ALTIVEC=0), so the scalar C resampler costs ~440ms per
+    // windowed 1280x720 -> 800x450 frame. The 1:1 fullscreen case takes
+    // swscale's unscaled copy path and is unaffected either way. Area (box)
+    // downscale with fast flags; log the return codes so an option-name
+    // mismatch is visible on the console.
+    int swsScaler = mpvSetOptionString(mpv, "sws-scaler", "area");
+    int swsFast   = mpvSetOptionString(mpv, "sws-fast", "yes");
+    X360_PROBE_INFO("[x360-sw] sws-scaler=area -> {}, sws-fast=yes -> {}", swsScaler, swsFast);
 #endif
     // 过低的值可能导致部分直播流无法正确播放
     mpvSetOptionString(mpv, "demuxer-lavf-analyzeduration", "0.4");
@@ -394,6 +693,21 @@ void MPVCore::init() {
         mpvTerminateDestroy(mpv);
         brls::fatal("Could not initialize mpv context");
     }
+
+#if defined(PLATFORM_XBOX360)
+#if X360_RUNTIME_PROBES
+    // P0 diagnostics: without this call mpv never emits MPV_EVENT_LOG_MESSAGE,
+    // so the [x360-sw] probe inside the software render path (reinit/clear/
+    // scale + src->dst geometry) and mpv's own notices, e.g. the swscale
+    // slow-copy warning (mp_verbose, M4), never reach the console log.
+    mpvRequestLogMessages(mpv, "v");
+#else
+    // 探针关闭：只保留 warn/error 级 mpv 日志。请求 "v" 会让 mpv 的 verbose
+    // 消息（含每 30 帧一行的 [x360-sw] 探针）全部经 Logger 输出，是 XBDM
+    // 日志刷屏的主要来源之一。
+    mpvRequestLogMessages(mpv, "warn");
+#endif
+#endif
 
     // set observe properties
     check_error(mpvObserveProperty(mpv, 1, "core-idle", MPV_FORMAT_FLAG));
@@ -541,6 +855,11 @@ MPVCore::~MPVCore() = default;
 #endif
 
 void MPVCore::clean() {
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    // Drop the experimental XAV player along with mpv; restart() rebuilds mpv
+    // and XAV is re-initialized lazily on the next setUrl.
+    brls::Xbox360Xav::instance().close();
+#endif
     check_error(mpvCommandString(this->mpv, "quit"));
 
     brls::Application::getWindowFocusChangedEvent()->unsubscribe(focusSubscription);
@@ -682,43 +1001,175 @@ void MPVCore::initializeVideo() {
 }
 
 void MPVCore::setFrameSize(brls::Rect r) {
+#if defined(MPV_SW_RENDER) && defined(PLATFORM_XBOX360)
+    const brls::Rect prevRect = rect;
+#endif
     rect = r;
     if (std::isnan(rect.getWidth()) || std::isnan(rect.getHeight())) return;
 
 #ifdef MPV_SW_RENDER
-#ifdef BOREALIS_USE_D3D11
+    int drawWidth  = rect.getWidth() * brls::Application::windowScale;
+    int drawHeight = rect.getHeight() * brls::Application::windowScale;
+    if (drawWidth == 0 || drawHeight == 0) return;
+#if defined(PLATFORM_XBOX360)
+    // 1:1 surface (plan §12/§13): keep the surface at the video's native size
+    // so libmpv_sw hits swscale's unscaled copy path (~2ms) instead of
+    // resampling in scalar C (~90-120ms with area, ~440ms with mpv's default
+    // LANCZOS; HAVE_ALTIVEC=0).  The surface always carries the video's exact
+    // aspect, so mpv's fit is the full surface and the conversion is 1:1;
+    // letterboxing for whatever aspect the view rect has is done by the GPU
+    // quad instead (Xbox360YUVRenderer::draw fits the texture aspect into the
+    // rect, and the NanoVG black background above fills the bars).  Buffer-
+    // baked bars would force the CPU scale again — that is what made a
+    // 854x480 live stream in an 800x477 window cost ~120ms/frame.  Before the
+    // video's size is known, fall back to the rect-sized surface.
+    const int videoW = getInt("video-params/w");
+    const int videoH = getInt("video-params/h");
+    const bool videoSizeKnown = videoW >= 16 && videoH >= 16 && (videoW % 2) == 0 && (videoH % 2) == 0;
+    swSurfaceFromVideo = videoSizeKnown;
+    if (videoSizeKnown) {
+        drawWidth  = videoW;
+        drawHeight = videoH;
+    }
+    // The surface stays even for 4:2:0 chroma; the ceiling is the D3D9 max
+    // texture size (4096) clamped to bilibili's live 原画 maximum (4K).
+    // PSV-parity decision (2026-10-04, plan §14.6): PSV renders through
+    // mpv's GPU path — it uploads native-size frames and scales in the
+    // shader, so it never freezes on a 1080p stream.  The Xbox360 equivalent
+    // of "GPU scaling" is the YUV quad (Xbox360YUVRenderer::draw fits any
+    // texture into the view rect), so the surface follows the video's native
+    // size as well.  The old 1280x720 cap forced libmpv_sw to resample every
+    // 1080p frame in scalar C (~250-360ms, HAVE_ALTIVEC=0) and pinned the
+    // main thread to ~3fps; ~85% of live rooms offer only the original
+    // quality tier (no transcode) and ignore qn=250, so 1080p live is
+    // unavoidable.  Above the ceiling the keep-aspect resample below remains
+    // as the last resort (no real content can reach it: VOD is client-capped
+    // at 720p, live 原画 tops out at 4K).
+    constexpr int maxRenderWidth  = 3840;
+    constexpr int maxRenderHeight = 2160;
+    if (videoSizeKnown) {
+        if (drawWidth > maxRenderWidth || drawHeight > maxRenderHeight) {
+            // Over the cap the surface must still keep the video's aspect
+            // (an independent clamp would distort it and bring the CPU scale
+            // back).  Only sources above 4K could land here — none exist in
+            // practice (VOD is client-capped at 720p, live 原画 tops out at
+            // 4K), so the resample path is dead code.
+            double scale = 1.0;
+            const double wScale = (double)maxRenderWidth / (double)drawWidth;
+            const double hScale = (double)maxRenderHeight / (double)drawHeight;
+            if (wScale < scale) scale = wScale;
+            if (hScale < scale) scale = hScale;
+            drawWidth  = (int)((double)drawWidth * scale);
+            drawHeight = (int)((double)drawHeight * scale);
+        }
+    } else {
+        if (drawWidth > maxRenderWidth) drawWidth = maxRenderWidth;
+        if (drawHeight > maxRenderHeight) drawHeight = maxRenderHeight;
+    }
+    drawWidth &= ~1;
+    drawHeight &= ~1;
+    if (drawWidth == 0 || drawHeight == 0) return;
+    // A pitch that is a multiple of 128 keeps the luma stride (and therefore
+    // the chroma stride, half of it) 32-byte aligned, which is what swscale
+    // requires before it will write into the buffer without an extra copy,
+    // and additionally lands every row on the 128-byte Xenon cache line so
+    // the per-frame plane upload copies whole lines (the frame pools in the
+    // Xbox 360 YouTube client are likewise 128-byte aligned).
+    const size_t newPitch  = ((size_t)drawWidth + 127) & ~(size_t)127;
+    const size_t requiredBytes = newPitch * (size_t)drawHeight + newPitch * (size_t)((drawHeight + 1) / 2);
+#else
+    const size_t requiredBytes = (size_t)drawWidth * (size_t)drawHeight * PIXCEL_SIZE;
+#endif
+
+#if defined(PLATFORM_XBOX360)
+    // P0 counters (plan §9.3): only a real surface size/pitch change runs the
+    // synchronous mpv render below and may realloc.  Log on change only, and
+    // throttle after the first few so a runaway rect loop cannot flood the
+    // performance capture with per-frame lines.
+    x360_size.calls++;
+    if (sw_size[0] != drawWidth || sw_size[1] != drawHeight || pitch != newPitch) {
+        x360_size.changes++;
+        if (x360_size.changes <= 8 || (x360_size.changes % 64) == 0)
+            brls::Logger::info(
+                "MPVCore::setFrameSize #{}: surface {}/{} -> {}/{} pitch {} -> {} rect {:.0f}x{:.0f} -> {:.0f}x{:.0f}",
+                x360_size.changes, sw_size[0], sw_size[1], drawWidth, drawHeight, (size_t)pitch, newPitch,
+                prevRect.getWidth(), prevRect.getHeight(), rect.getWidth(), rect.getHeight());
+        else
+            brls::Logger::debug(
+                "MPVCore::setFrameSize #{}: surface {}/{} -> {}/{} pitch {} -> {} rect {:.0f}x{:.0f} -> {:.0f}x{:.0f}",
+                x360_size.changes, sw_size[0], sw_size[1], drawWidth, drawHeight, (size_t)pitch, newPitch,
+                prevRect.getWidth(), prevRect.getHeight(), rect.getWidth(), rect.getHeight());
+    }
+#endif
+
+    if (pixels_storage != nullptr && requiredBytes > pixels_bytes) {
+        brls::Logger::debug("Enlarge video surface buffer");
+        free(pixels_storage);
+        pixels_storage = nullptr;
+        pixels         = nullptr;
+        pixels_bytes   = 0;
+    }
+
+    if (pixels == nullptr) {
+#if defined(PLATFORM_XBOX360)
+        // libswscale insists on 32-byte aligned plane pointers and strides;
+        // align to the 128-byte Xenon cache line instead, which satisfies
+        // swscale and keeps plane starts off cache-line middles (matching the
+        // 128-byte aligned frame memory used by the Xbox 360 YouTube client).
+        pixels_storage = malloc(requiredBytes + 127);
+        if (pixels_storage == nullptr) return;
+        pixels = (void *)(((uintptr_t)pixels_storage + 127) & ~(uintptr_t)127);
+#else
+        pixels_storage = malloc(requiredBytes);
+        if (pixels_storage == nullptr) return;
+        pixels = pixels_storage;
+#endif
+        pixels_bytes   = requiredBytes;
+        mpv_params[3].data = pixels;
+#if defined(PLATFORM_XBOX360)
+        x360_size.allocs++;
+        {
+            // A freshly malloc'd surface is zeroed, and zeroed YUV renders
+            // green through the shader.  Pre-fill limited-range black so a
+            // failed/absent first mpv render can never show green.
+            auto* base   = (unsigned char*)pixels;
+            const size_t lumaPitch = (size_t)newPitch;
+            const size_t lumaH     = (size_t)drawHeight;
+            const size_t cw        = (lumaPitch + 1) / 2;
+            const size_t ch        = (lumaH + 1) / 2;
+            std::memset(base, 16, lumaPitch * lumaH);
+            std::memset(base + lumaPitch * lumaH, 128, cw * ch);
+            std::memset(base + lumaPitch * lumaH + cw * ch, 128, cw * ch);
+        }
+#endif
+    }
+
+    sw_size[0] = drawWidth;
+    sw_size[1] = drawHeight;
+#if defined(PLATFORM_XBOX360)
+    pitch = newPitch;
+    // No RGBA texture to rebuild: mpv writes straight into `pixels`.
+    brls::Logger::debug("MPVCore::setFrameSize: {}/{} pitch={}", drawWidth, drawHeight, (size_t)pitch);
+#else
+#if defined(BOREALIS_USE_D3D11)
     // 使用 dx11 的拷贝交换，否则视频渲染异常
     const static int mpvImageFlags = NVG_IMAGE_STREAMING | NVG_IMAGE_COPY_SWAP;
 #else
     const static int mpvImageFlags = 0;
 #endif
-    int drawWidth  = rect.getWidth() * brls::Application::windowScale;
-    int drawHeight = rect.getHeight() * brls::Application::windowScale;
-    if (drawWidth == 0 || drawHeight == 0) return;
-    int frameSize = drawWidth * drawHeight;
-
-    if (pixels != nullptr && frameSize > sw_size[0] * sw_size[1]) {
-        brls::Logger::debug("Enlarge video surface buffer");
-        free(pixels);
-        pixels = nullptr;
-    }
-
-    if (pixels == nullptr) {
-        pixels             = malloc(frameSize * PIXCEL_SIZE);
-        mpv_params[3].data = pixels;
-    }
-
     if (nvg_image) nvgDeleteImage(brls::Application::getNVGContext(), nvg_image);
     nvg_image = nvgCreateImageRGBA(brls::Application::getNVGContext(), drawWidth, drawHeight, mpvImageFlags,
                                    (const unsigned char *)pixels);
-
-    sw_size[0] = drawWidth;
-    sw_size[1] = drawHeight;
     pitch      = PIXCEL_SIZE * drawWidth;
+#endif
 
     // 在视频暂停时调整纹理尺寸，视频画面会被清空为黑色，强制重新绘制一次，避免这个问题
-    mpvRenderContextRender(mpv_context, mpv_params);
+    const int setFrameRenderResult = mpvRenderContextRender(mpv_context, mpv_params);
+    if (setFrameRenderResult < 0)
+        brls::Logger::error("MPVCore::setFrameSize: mpv software render failed: {}", setFrameRenderResult);
     mpvRenderContextReportSwap(mpv_context);
+    // 上面直接渲染了一次，标记需要回写到 nvg 纹理（否则新纹理内容停在创建时的数据）
+    this->redraw = true;
 #elif !defined(MPV_USE_FB)
         // Using default framebuffer
 #if defined(BOREALIS_USE_GXM)
@@ -778,19 +1229,45 @@ void MPVCore::setFrameSize(brls::Rect r) {
 #endif
 }
 
-bool MPVCore::isValid() { return mpv_context != nullptr; }
+bool MPVCore::isValid() const { return mpv != nullptr && mpv_context != nullptr; }
 
-void MPVCore::draw(brls::Rect area, float alpha) {
-    if (mpv_context == nullptr) return;
-    if (!(this->rect == area)) setFrameSize(area);
+#if defined(PLATFORM_XBOX360) && X360_XAV
+namespace {
+// --- Experimental Xbox 360 hardware decode (XAV) ---------------------------
+// See library/borealis/.../xbox360_xav.hpp.  XAV decodes the video stream
+// while mpv is reduced to audio only (vid=no).  Everything here is inert
+// unless the user turned on Settings > Playback > Hardware decode.
 
-#ifdef MPV_SW_RENDER
-    if (!pixels) return;
+bool xavActive() { return MPVCore::HARDWARE_DEC && brls::Xbox360Xav::instance().initialized(); }
 
-    auto *vg = brls::Application::getNVGContext();
-    nvgUpdateImage(vg, nvg_image, (const unsigned char *)pixels);
+// Pull audio-file="..." out of the mpv option string built by VideoView.
+bool extractAudioOption(const std::string& extra, std::string& out) {
+    const std::string key = "audio-file=\"";
+    const auto pos        = extra.find(key);
+    if (pos == std::string::npos) return false;
+    const auto start = pos + key.size();
+    const auto end   = extra.find('"', start);
+    if (end == std::string::npos || end == start) return false;
+    out = extra.substr(start, end - start);
+    return true;
+}
 
-    // draw black background
+// Start (or restart) XAV on the given video URL.  Ignores mpv-only URLs.
+void startXavVideo(const std::string& url) {
+    if (url.empty() || url.rfind("edl://", 0) == 0) return;
+    auto* videoContext = (brls::Xbox360VideoContext*)brls::Application::getPlatform()->getVideoContext();
+    if (!videoContext || !videoContext->getDevice()) return;
+    auto& xav = brls::Xbox360Xav::instance();
+    if (!xav.init(videoContext->getDevice(), videoContext->getPresentParameters())) return;
+    if (!xav.open(url))
+        brls::Logger::error("XAV could not open the video stream (Optional Media Update codec pack missing?)");
+}
+
+// Video-only draw for the XAV path: black background + the decoded texture.
+void drawXavFrame(const brls::Rect& rect, float alpha) {
+    auto* vg = brls::Application::getNVGContext();
+    if (!vg) return;
+
     nvgBeginPath(vg);
     NVGcolor bg{};
     bg.a = alpha;
@@ -798,11 +1275,106 @@ void MPVCore::draw(brls::Rect area, float alpha) {
     nvgRect(vg, rect.getMinX(), rect.getMinY(), rect.getWidth(), rect.getHeight());
     nvgFill(vg);
 
+    auto& xav = brls::Xbox360Xav::instance();
+    int w = 0, h = 0;
+    IDirect3DTexture9* tex = xav.acquireFrame(w, h);
+    if (tex && w > 0 && h > 0)
+        brls::Xbox360YUVRenderer::drawTexture(vg, tex, w, h, rect.getMinX(), rect.getMinY(), rect.getWidth(),
+                                              rect.getHeight(), alpha);
+    xav.releaseFrame();
+}
+} // namespace
+#endif
+
+void MPVCore::draw(brls::Rect area, float alpha) {
+    if (mpv_context == nullptr) return;
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    if (xavActive()) {
+        // Experimental hardware decode: the picture comes from XAV, mpv only
+        // feeds the audio clock.
+        this->rect = area;
+        drawXavFrame(this->rect, alpha);
+        return;
+    }
+#endif
+    if (!(this->rect == area)) setFrameSize(area);
+#if defined(MPV_SW_RENDER) && defined(PLATFORM_XBOX360)
+    // The video's native size can change without the rect changing (first
+    // frame after load, quality switch).  Re-run setFrameSize when it does so
+    // the 1:1 surface engages; sampled every 250ms because getInt is a
+    // synchronous mpv property read.
+    {
+        static std::uint64_t nextVideoCheck = 0;
+        static int lastVideoW = 0, lastVideoH = 0;
+        const std::uint64_t now = brls::xbox360perf::nowUsec();
+        if (now >= nextVideoCheck) {
+            nextVideoCheck = now + 250000;
+            const int vw = getInt("video-params/w");
+            const int vh = getInt("video-params/h");
+            // Also record the cleared state (0) while switching videos: only
+            // remembering the last *known* size suppressed this re-run for a
+            // next video of the same resolution (both default to 640x360),
+            // leaving the surface on the rect fallback and the scalar scale
+            // running until a rect change (fullscreen) forced setFrameSize.
+            // When params are known but the surface still derives from the
+            // rect (fallback engaged while params were unavailable), force a
+            // re-run as well so the 1:1 surface engages.
+            if (vw != lastVideoW || vh != lastVideoH || (vw > 0 && !swSurfaceFromVideo)) {
+                lastVideoW = vw;
+                lastVideoH = vh;
+                if (vw > 0 && vh > 0)
+                    setFrameSize(area);
+            }
+        }
+    }
+#endif
+
+#ifdef MPV_SW_RENDER
+    if (!pixels) return;
+
+    auto *vg = brls::Application::getNVGContext();
+
+    // draw black background: covers the whole video area so anything mpv did
+    // not paint shows as black instead of stale UI
+    nvgBeginPath(vg);
+    NVGcolor bg{};
+    bg.a = alpha;
+    nvgFillColor(vg, bg);
+    nvgRect(vg, rect.getMinX(), rect.getMinY(), rect.getWidth(), rect.getHeight());
+    nvgFill(vg);
+
+#if defined(PLATFORM_XBOX360)
+    // Upload only when mpv produced a new frame; otherwise the L8 textures
+    // from the previous upload are reused.
+    const bool freshFrame = this->redraw;
+    this->redraw          = false;
+
+    const double probeStart = x360NowMs();
+    // Xbox360YUVRenderer flushes the NanoVG geometry queued so far (the
+    // background above and every widget drawn before the video), uploads the
+    // planes and lets the GPU convert YUV -> RGB.  Whatever is drawn after
+    // this call is flushed on top of the video when Application::frame ends
+    // the NanoVG frame, so the normal draw order is preserved.
+    brls::Xbox360YUVRenderer::draw(vg, freshFrame ? pixels : nullptr, sw_size[0], sw_size[1], pitch, rect.getMinX(),
+                                   rect.getMinY(), rect.getWidth(), rect.getHeight(), alpha);
+    x360_draw.add(x360NowMs() - probeStart);
+    x360_draw.flush("yuv renderer call (flush+upload+draw)");
+    x360_size.flush(sw_size[0], sw_size[1], pitch);
+    x360_mpvStats.flush();
+    x360_pipe.flush();
+#else
+    // Only upload a new MPV frame; the render callback marks this flag.
+    if (this->redraw) {
+        this->redraw = false;
+        nvgUpdateImage(vg, nvg_image, (const unsigned char *)pixels);
+    }
+
     // draw video
     nvgBeginPath(vg);
     nvgRect(vg, rect.getMinX(), rect.getMinY(), rect.getWidth(), rect.getHeight());
     nvgFillPaint(vg, nvgImagePattern(vg, 0, 0, rect.getWidth(), rect.getHeight(), 0, nvg_image, alpha));
     nvgFill(vg);
+#endif
 #elif defined(BOREALIS_USE_GXM)
     auto *vg = brls::Application::getNVGContext();
 
@@ -905,6 +1477,15 @@ std::string MPVCore::getCacheSpeed() const {
 void MPVCore::eventMainLoop() {
     while (true) {
         auto event = mpvWaitEvent(this->mpv, 0);
+#if defined(PLATFORM_XBOX360)
+        {
+            // 阶段细化到事件 id：事件循环整体卡住时看门狗直接报出卡在
+            // 哪类事件的处理里（evt1=SHUTDOWN evt8=FILE_LOADED evt17=LOG...）。
+            char evtStage[24];
+            std::snprintf(evtStage, sizeof(evtStage), "mpv:evt%d", (int)event->event_id);
+            brls::xbox360perf::stageMark(evtStage);
+        }
+#endif
         switch (event->event_id) {
             case MPV_EVENT_NONE:
                 return;
@@ -917,7 +1498,18 @@ void MPVCore::eventMainLoop() {
                 } else if (log->log_level <= MPV_LOG_LEVEL_INFO) {
                     brls::Logger::info("{}: {}", log->prefix, log->text);
                 } else if (log->log_level <= MPV_LOG_LEVEL_V) {
+#if defined(PLATFORM_XBOX360)
+                    // The swscale slow-copy notice is mp_verbose; promote it to
+                    // info so M4 stays visible at the release log level while
+                    // every other verbose line keeps its debug severity.
+                    if (log->text && std::string(log->text).find("slow copy") != std::string::npos) {
+                        brls::Logger::info("{}: {}", log->prefix, log->text);
+                    } else {
+                        brls::Logger::debug("{}: {}", log->prefix, log->text);
+                    }
+#else
                     brls::Logger::debug("{}: {}", log->prefix, log->text);
+#endif
                 } else {
                     brls::Logger::verbose("{}: {}", log->prefix, log->text);
                 }
@@ -1171,13 +1763,36 @@ void MPVCore::reset() {
 
 void MPVCore::setUrl(const std::string &url, const std::string &extra, const std::string &method) {
     brls::Logger::debug("{} Url: {}, extra: {}", method, url, extra);
-    if (extra.empty()) {
-        command_async("loadfile", url, method);
+
+    std::string mpvUrl   = url;
+    std::string mpvExtra = extra;
+
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    if (MPVCore::HARDWARE_DEC) {
+        // Experimental hardware decode: XAV owns the picture, mpv is reduced
+        // to audio only.  Only "replace" starts a new XAV stream; backup URLs
+        // are appended to mpv's playlist and are not given to XAV.
+        if (method == "replace") startXavVideo(url);
+        command_async("set", "vid", "no");
+
+        // Bilibili DASH hands us the audio as a separate stream.  Give mpv that
+        // URL instead of the video one, otherwise the video stream would be
+        // downloaded twice (once by XAV, once by mpv's demuxer).
+        std::string audioUrl;
+        if (extractAudioOption(extra, audioUrl)) {
+            mpvUrl   = audioUrl;
+            mpvExtra.clear();
+        }
+    }
+#endif
+
+    if (mpvExtra.empty()) {
+        command_async("loadfile", mpvUrl, method);
     } else {
         if (mpvClientApiVersion() >= MPV_MAKE_VERSION(2, 3))
-            command_async("loadfile", url, method, "0", extra);
+            command_async("loadfile", mpvUrl, method, "0", mpvExtra);
         else
-            command_async("loadfile", url, method, extra);
+            command_async("loadfile", mpvUrl, method, mpvExtra);
     }
 }
 
@@ -1196,19 +1811,50 @@ void MPVCore::setVolume(const std::string &value) {
 
 int64_t MPVCore::getVolume() const { return this->volume; }
 
-void MPVCore::resume() { command_async("set", "pause", "no"); }
+void MPVCore::resume() {
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    if (xavActive()) brls::Xbox360Xav::instance().setPaused(false);
+#endif
+    command_async("set", "pause", "no");
+}
 
-void MPVCore::pause() { command_async("set", "pause", "yes"); }
+void MPVCore::pause() {
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    if (xavActive()) brls::Xbox360Xav::instance().setPaused(true);
+#endif
+    command_async("set", "pause", "yes");
+}
 
-void MPVCore::stop() { command_async("stop"); }
+void MPVCore::stop() {
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    // Drop the XAV player so the next setUrl opens a fresh stream.
+    if (MPVCore::HARDWARE_DEC) brls::Xbox360Xav::instance().close();
+#endif
+    command_async("stop");
+}
 
-void MPVCore::seek(int64_t p) { command_async("seek", p, "absolute"); }
+void MPVCore::seek(int64_t p) {
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    if (xavActive()) brls::Xbox360Xav::instance().seekAbsolute((double)p);
+#endif
+    command_async("seek", p, "absolute");
+}
 
 void MPVCore::seek(const std::string &p) { command_async("seek", p, "absolute"); }
 
-void MPVCore::seekRelative(int64_t p) { command_async("seek", p, "relative"); }
+void MPVCore::seekRelative(int64_t p) {
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    if (xavActive()) brls::Xbox360Xav::instance().seekAbsolute(this->playback_time + (double)p);
+#endif
+    command_async("seek", p, "relative");
+}
 
-void MPVCore::seekPercent(double p) { command_async("seek", p * 100, "absolute-percent"); }
+void MPVCore::seekPercent(double p) {
+#if defined(PLATFORM_XBOX360) && X360_XAV
+    if (xavActive() && this->duration > 0) brls::Xbox360Xav::instance().seekAbsolute(p * (double)this->duration);
+#endif
+    command_async("seek", p * 100, "absolute-percent");
+}
 
 bool MPVCore::isStopped() const { return video_stopped; }
 
@@ -1307,28 +1953,31 @@ int MPVCore::getHue() const { return video_hue; }
 
 // todo: remove these sync function
 std::string MPVCore::getString(const std::string &key) {
+    if (!mpv) return "";
     char *value = nullptr;
-    mpvGetProperty(mpv, key.c_str(), MPV_FORMAT_STRING, &value);
-    if (!value) return "";
+    if (mpvGetProperty(mpv, key.c_str(), MPV_FORMAT_STRING, &value) < 0 || !value) return "";
     std::string result = std::string{value};
     mpvFree(value);
     return result;
 }
 
 double MPVCore::getDouble(const std::string &key) {
+    if (!mpv) return 0;
     double value = 0;
-    mpvGetProperty(mpv, key.c_str(), MPV_FORMAT_DOUBLE, &value);
+    if (mpvGetProperty(mpv, key.c_str(), MPV_FORMAT_DOUBLE, &value) < 0) return 0;
     return value;
 }
 
 int64_t MPVCore::getInt(const std::string &key) {
+    if (!mpv) return 0;
     int64_t value = 0;
-    mpvGetProperty(mpv, key.c_str(), MPV_FORMAT_INT64, &value);
+    if (mpvGetProperty(mpv, key.c_str(), MPV_FORMAT_INT64, &value) < 0) return 0;
     return value;
 }
 
 std::unordered_map<std::string, mpv_node> MPVCore::getNodeMap(const std::string &key) {
-    mpv_node node;
+    if (!mpv) return {};
+    mpv_node node{};
     std::unordered_map<std::string, mpv_node> nodeMap;
     if (mpvGetProperty(mpv, key.c_str(), MPV_FORMAT_NODE, &node) < 0) return nodeMap;
     if (node.format != MPV_FORMAT_NODE_MAP) return nodeMap;
@@ -1405,5 +2054,16 @@ void MPVCore::_command_async(const std::vector<std::string> &commands) {
         res.emplace_back(i.c_str());
     }
     res.emplace_back(nullptr);
+#if defined(PLATFORM_XBOX360)
+    // P0 §5.5-3 测量：mpv_command_async 理论上不阻塞，但 mpv 内部在
+    // set_url/重入时会持锁；若这里出现长耗时即为"冻结主线程"的直接来源。
+    const std::uint64_t t_cmd = brls::xbox360perf::nowUsec();
     mpvCommandAsync(mpv, 0, res.data());
+    const double cmdMs = brls::xbox360perf::msSince(t_cmd);
+    if (cmdMs >= 100.0)
+        X360_PROBE_INFO("[x360-mpv] command_async '{}' took {:.0f} ms", commands.empty() ? "?" : commands[0],
+                           cmdMs);
+#else
+    mpvCommandAsync(mpv, 0, res.data());
+#endif
 }

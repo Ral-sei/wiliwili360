@@ -6,6 +6,7 @@
 #include <borealis/core/application.hpp>
 #include <borealis/core/cache_helper.hpp>
 #include <borealis/core/thread.hpp>
+#include <borealis/platforms/xbox360/xbox360_perf.hpp>
 #include <stb_image.h>
 
 #include "utils/image_helper.hpp"
@@ -98,7 +99,24 @@ static void dxt_compress(uint8_t *dst, uint8_t *src, uint32_t w, uint32_t h, boo
 }
 #endif
 
-#if !defined(PLATFORM_XBOX360)
+#if defined(PLATFORM_XBOX360)
+// CPR's Xbox worker uses an XDK thread so image transfer and decoding stay
+// off the UI thread. Texture creation remains in the brls::sync callback.
+class ImageThreadPool : public brls::Singleton<ImageThreadPool> {
+public:
+    ImageThreadPool() = default;
+
+    template <typename Fn>
+    void Submit(Fn&& fn) {
+        cpr::async(std::forward<Fn>(fn));
+    }
+
+    CURLSH* getShare() { return share.getShare(); }
+
+private:
+    bilibili::CurlSharedObject share;
+};
+#else
 class ImageThreadPool : public cpr::ThreadPool, public brls::Singleton<ImageThreadPool> {
 public:
     ImageThreadPool() : cpr::ThreadPool(1, ImageHelper::REQUEST_THREADS, std::chrono::milliseconds(5000)) {
@@ -152,7 +170,14 @@ std::shared_ptr<ImageHelper> ImageHelper::with(brls::Image* view) {
 }
 
 void ImageHelper::load(const std::string &url) {
-    this->imageUrl = bilibili::HTTP::VERIFY.verify ? url :pystring::replace(url, "https", "http", 1);
+#if defined(PLATFORM_XBOX360)
+    // The Xbox transport supports HTTPS without certificate verification. A
+    // number of Bilibili image CDNs reject the HTTP fallback, so keep the
+    // original URL even while TLS verification is disabled.
+    this->imageUrl = url;
+#else
+    this->imageUrl = bilibili::HTTP::VERIFY.verify ? url : pystring::replace(url, "https", "http", 1);
+#endif
 
 #ifdef BOREALIS_USE_GXM
     std::vector<std::string> urls = pystring::rsplit(this->imageUrl, "@", 1);
@@ -176,12 +201,6 @@ void ImageHelper::load(const std::string &url) {
         return;
     }
 
-#if defined(PLATFORM_XBOX360)
-    // M3 is offline; the Xbox HTTP/image worker arrives with the M4 transport.
-    this->clean();
-    return;
-#else
-
     //todo: 可能会发生同时请求多个重复链接的情况，此种情况下最好合并为一个请求
 
     // 缓存网络图片
@@ -195,7 +214,6 @@ void ImageHelper::load(const std::string &url) {
         }
         this->requestImage();
     });
-#endif
 }
 
 static inline void freeImageData(uint8_t* imageData, bool isWebp) {
@@ -209,9 +227,6 @@ static inline void freeImageData(uint8_t* imageData, bool isWebp) {
 }
 
 void ImageHelper::requestImage() {
-#if defined(PLATFORM_XBOX360)
-    this->clean();
-#else
     brls::Logger::verbose("request Image 2: {} {}", this->imageUrl, this->isCancel);
 
     // 请求图片
@@ -221,6 +236,15 @@ void ImageHelper::requestImage() {
     curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, bilibili::HTTP::DNS_CACHE_TIMEOUT);
     session.SetTimeout(cpr::Timeout{bilibili::HTTP::TIMEOUT});
     session.SetConnectTimeout(cpr::ConnectTimeout{bilibili::HTTP::CONNECTION_TIMEOUT});
+    session.SetHeader(bilibili::HTTP::HEADERS);
+#if defined(PLATFORM_XBOX360)
+    // Match HTTP::createSession(): the Xbox curl fork handles close-delimited
+    // HTTP/1.0 responses and identity encoding more reliably than chunked,
+    // compressed HTTP/1.1 image responses.
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_0);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+#endif
     session.SetVerifySsl(bilibili::HTTP::VERIFY);
     session.SetProxies(bilibili::HTTP::PROXIES);
     session.SetUrl(cpr::Url{this->imageUrl});
@@ -228,16 +252,22 @@ void ImageHelper::requestImage() {
     cpr::Response r = session.Get();
 
     // 图片请求失败或取消请求
-    if (r.status_code != 200 || r.downloaded_bytes == 0 || this->isCancel) {
-        brls::Logger::verbose("request undone: {} {} {} {}", r.status_code, r.downloaded_bytes, this->isCancel,
-                              r.url.str());
-
+    const size_t responseBytes = r.text.size();
+    if (r.status_code < 200 || r.status_code >= 300 || responseBytes == 0) {
+        // P0 排查「刷新后封面全不显示」：非取消场景下的 HTTP 失败要看得见
+        brls::Logger::info("[img] http fail code={} bytes={} dl={} err={} cancel={} url={}", (int)r.status_code,
+                           responseBytes, (long long)r.downloaded_bytes, (int)r.error.code, this->isCancel,
+                           r.url.str());
+        this->clean();
+        return;
+    }
+    if (this->isCancel) {
+        brls::Logger::verbose("request undone (cancel): {}", r.url.str());
         this->clean();
         return;
     }
 
-    brls::Logger::verbose("load pic:{} size:{} bytes by{} to {} {}", r.url.str(), r.downloaded_bytes, (size_t)this,
-                          (size_t)this->imageView, this->imageView->describe());
+    brls::Logger::verbose("load pic:{} size:{} bytes by{}", r.url.str(), responseBytes, (size_t)this);
 
     uint8_t* imageData = nullptr;
     int imageW = 0, imageH = 0;
@@ -245,16 +275,42 @@ void ImageHelper::requestImage() {
 
 #ifdef USE_WEBP
     if (imageUrl.size() > 5 && imageUrl.substr(imageUrl.size() - 5, 5) == ".webp") {
-        imageData = WebPDecodeRGBA((const uint8_t*)r.text.c_str(), (size_t)r.downloaded_bytes, &imageW, &imageH);
+        imageData = WebPDecodeRGBA((const uint8_t*)r.text.data(), responseBytes, &imageW, &imageH);
         isWebp    = true;
     } else {
 #endif
         int n;
         imageData =
-            stbi_load_from_memory((unsigned char*)r.text.c_str(), (int)r.downloaded_bytes, &imageW, &imageH, &n, 4);
+            stbi_load_from_memory((unsigned char*)r.text.data(), (int)responseBytes, &imageW, &imageH, &n, 4);
 #ifdef USE_WEBP
     }
 #endif
+
+    // P0 排查「刷新后封面全不显示」：HTTP 2xx 且有 body 却解码失败时，
+    // 打印 stbi 失败原因（"out of memory" = 内存耗尽 / "bad jpeg" 等 = 响应体被截断）
+    // 以及响应体前 16 字节（FFD8.. = 真 JPEG，"<" 开头 = 服务器返回了 HTML 错误页）。
+    // 另附一次堆内存探针：从 64MB 往下试分配并立即释放，报告仍能拿到的最大连续块。
+    std::string failWhy, failHead;
+    size_t failHeap = 0;
+    if (!imageData) {
+        const char* why = isWebp ? "webp-decode" : stbi_failure_reason();
+        failWhy         = why ? why : "unknown";
+        static const char* hexd = "0123456789abcdef";
+        for (size_t i = 0; i < 16 && i < responseBytes; i++) {
+            unsigned char c = (unsigned char)r.text[i];
+            failHead.push_back(hexd[c >> 4]);
+            failHead.push_back(hexd[c & 15]);
+        }
+        static const size_t kProbe[] = {64u << 20, 32u << 20, 16u << 20, 8u << 20, 4u << 20, 2u << 20, 1u << 20};
+        for (size_t s : kProbe) {
+            void* p = malloc(s);
+            if (p) {
+                free(p);
+                failHeap = s;
+                break;
+            }
+        }
+    }
 
 #ifdef BOREALIS_USE_GXM
     if (imageData) {
@@ -269,7 +325,10 @@ void ImageHelper::requestImage() {
     }
 #endif
 
-    brls::sync([this, r, imageData, imageW, imageH, isWebp]() {
+    // tag "img"：来源辨识用（纹理创建走 image 桶，任务标签补足慢任务日志）
+    brls::sync([this, r, imageData, imageW, imageH, isWebp, failWhy, failHead, failHeap]() {
+        // P0 §3.1 测量：归类到 sync split 的 image 桶（纹理创建 + 缓存查询全耗时）
+        brls::xbox360perf::SyncScope syncScope(brls::xbox360perf::SYNC_IMAGE);
         // 再检查一遍缓存
         int tex = brls::TextureCache::instance().getCache(this->imageUrl);
         if (tex > 0) {
@@ -285,7 +344,8 @@ void ImageHelper::requestImage() {
                 tex = nvgCreateImageRGBA(vg, imageW, imageH, 0, imageData);
 #endif
             } else {
-                brls::Logger::error("Failed to load image: {}", this->imageUrl);
+                brls::Logger::error("[img] decode fail: why={} bytes={} head={} heap>={} url={}", failWhy,
+                                    r.text.size(), failHead, failHeap, this->imageUrl);
             }
 
             if (tex > 0) {
@@ -294,6 +354,9 @@ void ImageHelper::requestImage() {
                     brls::Logger::verbose("load image: {}", this->imageUrl);
                     this->imageView->innerSetImage(tex);
                 }
+            } else if (imageData) {
+                // P0 §5.11：解码成功但纹理创建失败 = 显存/堆耗尽，是内存问题的直接信号
+                brls::Logger::error("[img] texture create failed {}x{} url={}", imageW, imageH, this->imageUrl);
             }
         }
         if (imageData) {
@@ -304,8 +367,7 @@ void ImageHelper::requestImage() {
 #endif
         }
         this->clean();
-    });
-#endif
+    }, "img");
 }
 
 void ImageHelper::clean() {
@@ -347,6 +409,8 @@ void ImageHelper::setRequestThreads(size_t num) {
 #if !defined(PLATFORM_XBOX360)
     ImageThreadPool::instance().min_thread_num = 1;
     ImageThreadPool::instance().max_thread_num = num;
+#else
+    (void)num;
 #endif
 }
 

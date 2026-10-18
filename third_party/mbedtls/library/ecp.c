@@ -31,6 +31,31 @@
 
 #include "common.h"
 
+#if defined(_XBOX)
+/* wiliwili P0 五轮埋点：握手 15~25s 的差额已被归因到 TLS 的
+   CLIENT_KEY_EXCHANGE 状态（见 curl 的 [tls] hs-... st: 行）。ECDSA/ECDH
+   曲线运算是该状态里唯一的重活，这里对每次标量乘法计时，直接给出
+   "单次 ecp mul 要多久、哪条曲线"，用于判断是本地 CPU 慢还是仍有等待。 */
+#include <xtl.h>
+extern void DbgPrint(const char *fmt, ...);
+#if !defined(X360_RUNTIME_PROBES) || !X360_RUNTIME_PROBES
+/* Xbox 360 诊断探针总开关（默认 OFF）：关闭时本文件的 [tls] 探针编译为空。 */
+#define DbgPrint(...) ((void)0)
+#endif
+static unsigned long x360_ecp_ms(void)
+{
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER now;
+    if(freq.QuadPart == 0) {
+        QueryPerformanceFrequency(&freq);
+        if(freq.QuadPart == 0)
+            freq.QuadPart = 1;
+    }
+    QueryPerformanceCounter(&now);
+    return (unsigned long)((double)now.QuadPart * 1000.0 / (double)freq.QuadPart);
+}
+#endif
+
 /**
  * \brief Function level alternative implementation.
  *
@@ -2698,6 +2723,12 @@ int mbedtls_ecp_mul_restartable(mbedtls_ecp_group *grp, mbedtls_ecp_point *R,
     ECP_VALIDATE_RET(R   != NULL);
     ECP_VALIDATE_RET(m   != NULL);
     ECP_VALIDATE_RET(P   != NULL);
+#if defined(_XBOX)
+    /* wiliwili 五轮埋点：CKE 状态被认定为 15s 握手的时间黑洞，而线程
+       GetThreadTimes 显示期间几乎没在执行（cpu << dur）→ 在等。这里给
+       单次标量乘法计时（曲线 + 耗时），用来判断"算得慢"还是"等得久"。 */
+    const unsigned long x360_t0 = x360_ecp_ms();
+#endif
 
 #if defined(MBEDTLS_ECP_RESTARTABLE)
     /* reset ops count for this call if top-level */
@@ -2756,6 +2787,11 @@ cleanup:
     }
 #endif
 
+#if defined(_XBOX)
+    /* grp->id: 1=secp256r1 2=secp384r1 3=secp521r1 */
+    DbgPrint("[tls] ecp mul grp=%d dt=%lu ms", (int)grp->id,
+             x360_ecp_ms() - x360_t0);
+#endif
     return ret;
 }
 

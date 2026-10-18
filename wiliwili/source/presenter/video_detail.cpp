@@ -2,6 +2,8 @@
 // Created by fang on 2022/8/9.
 //
 #include <cstdlib>
+#include <cctype>
+#include <algorithm>
 #include <tinyxml2.h>
 #include <pystring.h>
 #include <borealis/core/thread.hpp>
@@ -15,6 +17,82 @@
 #include "view/mpv_core.hpp"
 #include "bilibili/result/mine_collection_result.h"
 #include "view/video_snapshot_core.hpp"
+
+#if defined(PLATFORM_XBOX360)
+#include <borealis/platforms/xbox360/xbox360_perf.hpp>
+#endif
+
+namespace {
+
+// The legacy list.so endpoint occasionally returns danmaku text containing
+// an illegal XML control byte or an unescaped '&'.  Desktop XML parsers tend
+// to recover from this, while tinyxml2 correctly rejects the whole document.
+// Keep the normal parser as the fast path and recover individual <d> records
+// when one bad comment would otherwise discard the complete list.
+std::string danmakuXmlText(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') continue;
+        result.push_back(text[i]);
+    }
+    return result;
+}
+
+bool recoverDanmakuItems(const std::string& xml, std::vector<DanmakuItem>& items) {
+    size_t cursor = 0;
+    size_t records = 0;
+    while ((cursor = xml.find("<d", cursor)) != std::string::npos) {
+        size_t nameEnd = cursor + 2;
+        if (nameEnd >= xml.size() || (xml[nameEnd] != '>' && !std::isspace(static_cast<unsigned char>(xml[nameEnd])))) {
+            cursor = nameEnd;
+            continue;
+        }
+        size_t openEnd = xml.find('>', cursor);
+        if (openEnd == std::string::npos) break;
+        size_t nextTag = xml.find("<d", openEnd + 1);
+        while (nextTag != std::string::npos) {
+            size_t nextNameEnd = nextTag + 2;
+            if (nextNameEnd < xml.size() &&
+                (xml[nextNameEnd] == '>' || std::isspace(static_cast<unsigned char>(xml[nextNameEnd]))))
+                break;
+            nextTag = xml.find("<d", nextNameEnd);
+        }
+        size_t close = xml.find("</d>", openEnd + 1);
+        if (nextTag != std::string::npos && (close == std::string::npos || nextTag < close)) {
+            cursor = nextTag;
+            continue;
+        }
+        if (close == std::string::npos) break;
+
+        ++records;
+        std::string tag = xml.substr(cursor, openEnd - cursor + 1);
+        size_t p = tag.find("p=");
+        if (p != std::string::npos) {
+            size_t valueStart = p + 2;
+            if (valueStart < tag.size() && (tag[valueStart] == '\"' || tag[valueStart] == '\'')) {
+                char quote = tag[valueStart++];
+                size_t valueEnd = tag.find(quote, valueStart);
+                if (valueEnd != std::string::npos) {
+                    std::string record = "<i>" + tag + xml.substr(openEnd + 1, close - openEnd - 1) + "</d></i>";
+                    tinyxml2::XMLDocument recordDocument;
+                    if (recordDocument.Parse(record.data(), record.size()) == tinyxml2::XML_SUCCESS) {
+                        auto* item = recordDocument.RootElement()->FirstChildElement("d");
+                        const char* content = item ? item->GetText() : nullptr;
+                        const char* attributes = item ? item->Attribute("p") : nullptr;
+                        if (content && attributes) items.emplace_back(content, attributes);
+                    }
+                }
+            }
+        }
+        cursor = close + 4;
+    }
+    brls::Logger::error("DANMAKU: malformed XML recovery found {} records and kept {}", records, items.size());
+    return !items.empty();
+}
+
+} // namespace
 
 /// 请求视频数据
 void VideoDetail::requestData(const bilibili::VideoDetailResult& video) { this->requestVideoInfo(video.bvid); }
@@ -261,8 +339,18 @@ void VideoDetail::requestVideoInfo(const std::string& bvid) {
     GA("plain_video", {{"bvid", bvid}})
 }
 
+// One-shot switch used by the media-URL renewal path below. It is deliberately
+// a file-local static instead of a VideoDetail member: adding a member changes
+// the class layout, and this tree's Xbox build does not reliably rebuild every
+// translation unit that includes video_detail.hpp (stale objects then disagree
+// about sizeof/offsets and corrupt the heap). Renewal runs on the main thread,
+// so no synchronization is needed.
+static bool s_skipNextDanmakuRequest = false;
+
 /// 获取视频地址
 void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo) {
+    const bool requestDanmaku = !s_skipNextDanmakuRequest;
+    s_skipNextDanmakuRequest = false;
     // 重置MPV
     MPVCore::instance().reset();
     ASYNC_RETAIN
@@ -274,8 +362,19 @@ void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool re
         [ASYNC_TOKEN](const bilibili::VideoUrlResult& result) {
             brls::sync([ASYNC_TOKEN, result]() {
                 ASYNC_RELEASE
+#if defined(PLATFORM_XBOX360)
+                // P0 §5.5-3 测量：标签 sync lambda，配合 [x360-perf] slow sync task
+                // 定位 12.3s 冻结是否发生在"设置播放地址"这条链上。
+                const std::uint64_t t_playurl = brls::xbox360perf::nowUsec();
+                X360_PROBE_INFO("[x360-playurl] sync enter");
+#endif
                 this->videoUrlResult = result;
                 this->onVideoPlayUrl(result);
+#if defined(PLATFORM_XBOX360)
+                const double tookMs = (double)(brls::xbox360perf::nowUsec() - t_playurl) / 1000.0;
+                if (tookMs >= 300.0)
+                    X360_PROBE_INFO("[x360-playurl] sync took {:.0f} ms", tookMs);
+#endif
             });
         },
         [ASYNC_TOKEN](BILI_ERR) {
@@ -288,7 +387,7 @@ void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool re
     // 请求当前视频在线人数
     this->requestVideoOnline(bvid, cid);
     // 请求弹幕
-    this->requestVideoDanmaku(cid);
+    if (requestDanmaku) this->requestVideoDanmaku(cid);
     // 请求分P详情 （字幕链接/历史播放记录）
     this->requestVideoPageDetail(bvid, cid, requestHistoryInfo);
     // 请求高能进度条
@@ -299,6 +398,8 @@ void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool re
 
 /// 获取番剧地址
 void VideoDetail::requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo) {
+    const bool requestDanmaku = !s_skipNextDanmakuRequest;
+    s_skipNextDanmakuRequest = false;
     // 重置MPV
     MPVCore::instance().reset();
 
@@ -310,8 +411,18 @@ void VideoDetail::requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, b
             brls::sync([ASYNC_TOKEN, result]() {
                 ASYNC_RELEASE
                 brls::Logger::debug("BILI::get_video_url");
+#if defined(PLATFORM_XBOX360)
+                // P0 §5.5-3 测量：番剧路径同样的 playurl sync 标签。
+                const std::uint64_t t_playurl = brls::xbox360perf::nowUsec();
+                X360_PROBE_INFO("[x360-playurl] season sync enter");
+#endif
                 this->videoUrlResult = result.video_info;
                 this->onVideoPlayUrl(this->videoUrlResult);
+#if defined(PLATFORM_XBOX360)
+                const double tookMs = (double)(brls::xbox360perf::nowUsec() - t_playurl) / 1000.0;
+                if (tookMs >= 300.0)
+                    X360_PROBE_INFO("[x360-playurl] season sync took {:.0f} ms", tookMs);
+#endif
             });
         },
         [ASYNC_TOKEN](BILI_ERR) {
@@ -325,13 +436,23 @@ void VideoDetail::requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, b
     // 请求当前视频在线人数
     this->requestVideoOnline(bvid, cid);
     // 请求弹幕
-    this->requestVideoDanmaku(cid);
+    if (requestDanmaku) this->requestVideoDanmaku(cid);
     // 请求分P详情 （字幕链接/历史播放记录）
     this->requestVideoPageDetail(bvid, cid, requestHistoryInfo);
     // 请求高能进度条
     this->requestHighlightProgress(cid);
     // 请求视频快照（缩略图）
     this->requestVideoSnapshot(bvid, cid);
+}
+
+void VideoDetail::requestVideoUrlWithoutDanmaku(const std::string& bvid, uint64_t cid) {
+    s_skipNextDanmakuRequest = true;
+    requestVideoUrl(bvid, cid, false);
+}
+
+void VideoDetail::requestSeasonVideoUrlWithoutDanmaku(const std::string& bvid, uint64_t cid) {
+    s_skipNextDanmakuRequest = true;
+    requestSeasonVideoUrl(bvid, cid, false);
 }
 
 /// 获取投屏地址
@@ -484,11 +605,23 @@ void VideoDetail::requestVideoDanmaku(uint64_t cid) {
             brls::Logger::debug("DANMAKU: start decode");
 
             // Load XML
+            std::string xml = danmakuXmlText(result);
             tinyxml2::XMLDocument document = tinyxml2::XMLDocument();
-            tinyxml2::XMLError error       = document.Parse(result.c_str());
+            tinyxml2::XMLError error       = document.Parse(xml.data(), xml.size());
 
             if (error != tinyxml2::XMLError::XML_SUCCESS) {
-                brls::Logger::error("Error decode danmaku xml[1]: {}", std::to_string(error));
+                brls::Logger::error("Error decode danmaku xml[1]: {} line {}: {} ({} bytes)",
+                                    std::to_string(error), document.ErrorLineNum(), document.ErrorStr(), xml.size());
+
+                // A malformed comment must not hide all valid comments.
+                std::vector<DanmakuItem> recovered;
+                if (recoverDanmakuItems(xml, recovered)) {
+                    brls::Logger::debug("DANMAKU: recovered {} items from malformed XML", recovered.size());
+                    std::sort(recovered.begin(), recovered.end());
+                    brls::sync([items = std::move(recovered)]() mutable {
+                        DanmakuCore::instance().loadDanmakuData(std::move(items));
+                    });
+                }
                 return;
             }
             tinyxml2::XMLElement* element = document.RootElement();
@@ -513,9 +646,13 @@ void VideoDetail::requestVideoDanmaku(uint64_t cid) {
 #endif
             }
 
-            brls::sync([items]() { DanmakuCore::instance().loadDanmakuData(items); });
+            const size_t itemCount = items.size();
+            std::sort(items.begin(), items.end());
+            brls::sync([items = std::move(items)]() mutable {
+                DanmakuCore::instance().loadDanmakuData(std::move(items));
+            });
 
-            brls::Logger::debug("DANMAKU: decode done: {}", items.size());
+            brls::Logger::debug("DANMAKU: decode done: {}", itemCount);
         },
         [ASYNC_TOKEN](BILI_ERR) {
             ASYNC_RELEASE

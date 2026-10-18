@@ -40,6 +40,11 @@ public:
 #ifdef __PSV__
     // 720P
     static inline int defaultQuality = 150;
+#elif defined(PLATFORM_XBOX360)
+    // 超清 (720P): Xenon 软解上限为 720p, 1080p 流 (蓝光400/原画10000) 解码
+    // 必然卡顿, 因此在请求直播地址时就限档 (与 PSV 同一模式)。
+    // qn 档位: 80 流畅 / 150 高清 / 250 超清720P / 400 蓝光1080P / 10000 原画
+    static inline int defaultQuality = 250;
 #else
     static inline int defaultQuality = 0;
 #endif

@@ -4,12 +4,14 @@
 
 #include <borealis/core/thread.hpp>
 #include <borealis/core/touch/tap_gesture.hpp>
+#include <borealis/platforms/xbox360/xbox360_perf.hpp>
 #include <borealis/views/dialog.hpp>
 
 #include "activity/live_player_activity.hpp"
 #include "utils/number_helper.hpp"
 #include "live/dl_emoticon.hpp"
 
+#include <cstdio>
 #include <vector>
 #include <chrono>
 
@@ -424,20 +426,24 @@ void LiveActivity::onDanmakuInfo(int roomid, const bilibili::LiveDanmakuinfo& in
 
                 ASYNC_RETAIN
                 // 使用brls::sync确保在UI线程中更新UI
+                // tag "lws" + stageMark：直播冻结排查时 [stall-task] 看门狗
+                // 直接报出 WS 消息处理卡在哪个阶段（parse/extract/overlay）。
                 brls::sync([state, msg, ASYNC_TOKEN]() {
                     ASYNC_RELEASE
                     if (!state->isActive.load(std::memory_order_acquire)) {
                         brls::Logger::debug("LiveActivity: UI更新中断: 对象已被销毁");
                         return;
                     }
-                    
+
+                    brls::xbox360perf::stageMark("lws:parse");
                     std::vector<uint8_t> payload(msg.begin(), msg.end());
                     std::vector<std::string> messages = parse_packet(payload);
-                    
+
                     if (messages.empty()) {
                         return;
                     }
-                    
+
+                    brls::xbox360perf::stageMark("lws:extract");
                     std::vector<LiveDanmakuItem> danmaku_list;
                     std::vector<LiveDanmakuItem> sc_list;
                     
@@ -470,6 +476,7 @@ void LiveActivity::onDanmakuInfo(int roomid, const bilibili::LiveDanmakuinfo& in
                     }
                     
                     // 处理弹幕到视频
+                    brls::xbox360perf::stageMark("lws:overlay");
                     process_danmaku(danmaku_list);
                     
                     // 处理弹幕到侧边栏
@@ -481,7 +488,7 @@ void LiveActivity::onDanmakuInfo(int roomid, const bilibili::LiveDanmakuinfo& in
                     if (!sc_list.empty() && state->isActive.load(std::memory_order_acquire)) {
                         this->processSuperChatForSidebar(sc_list);
                     }
-                });
+                }, "lws");
             });
             
             // 连接弹幕服务器
@@ -578,19 +585,29 @@ void LiveActivity::processDanmakuForSidebar(const std::vector<LiveDanmakuItem>& 
     auto state = this->threadState;
     // 确保UI更新在主线程进行
     ASYNC_RETAIN
+    // tag "lws-side" + 每行细化阶段：这是 19:07/18:31/17:55 三次 20-38s
+    // 冻结的头号嫌疑（入队时机、untagged、other 桶全部吻合）。
     brls::sync([state, filtered_danmakus = std::move(filtered_danmakus), ASYNC_TOKEN]() mutable {
         ASYNC_RELEASE
         // 再次检查UI组件和活动状态
         if (!state->isActive.load(std::memory_order_acquire) || !this->shouldShowSidebar() || !this->liveDanmakuContainer) {
             return;
         }
-        
+
+        int rowIdx = 0;
         for (const auto& danmaku : filtered_danmakus) {
+            char rowStage[32];
+            std::snprintf(rowStage, sizeof(rowStage), "lws-side:create#%d", rowIdx);
+            brls::xbox360perf::stageMark(rowStage);
             auto* item = LiveDanmakuItemView::create();
+            std::snprintf(rowStage, sizeof(rowStage), "lws-side:set#%d", rowIdx);
+            brls::xbox360perf::stageMark(rowStage);
             item->setDanmaku(danmaku);
             
             // 将新弹幕添加到顶部（但在置顶SC之下）
             if (this->liveDanmakuContainer->getChildren().size() > 0) {
+                std::snprintf(rowStage, sizeof(rowStage), "lws-side:pos#%d", rowIdx);
+                brls::xbox360perf::stageMark(rowStage);
                 // 查找合适的插入位置：在所有置顶SC之后
                 int insertPos = 0;
                 for (size_t i = 0; i < this->liveDanmakuContainer->getChildren().size(); i++) {
@@ -601,13 +618,18 @@ void LiveActivity::processDanmakuForSidebar(const std::vector<LiveDanmakuItem>& 
                         break;
                     }
                 }
+                std::snprintf(rowStage, sizeof(rowStage), "lws-side:add#%d", rowIdx);
+                brls::xbox360perf::stageMark(rowStage);
                 this->liveDanmakuContainer->addView(item, insertPos);
             } else {
+                std::snprintf(rowStage, sizeof(rowStage), "lws-side:add#%d", rowIdx);
+                brls::xbox360perf::stageMark(rowStage);
                 this->liveDanmakuContainer->addView(item);
             }
             
             // 控制侧边栏弹幕数量
             if (this->liveDanmakuContainer->getChildren().size() > this->maxSidebarDanmakuCount) {
+                brls::xbox360perf::stageMark("lws-side:trim");
                 auto& children = this->liveDanmakuContainer->getChildren();
                 
                 // 从末尾开始查找非置顶的项目删除
@@ -619,8 +641,9 @@ void LiveActivity::processDanmakuForSidebar(const std::vector<LiveDanmakuItem>& 
                     }
                 }
             }
+            rowIdx++;
         }
-    });
+    }, "lws-side");
 }
 
 void LiveActivity::processSuperChatForSidebar(const std::vector<LiveDanmakuItem>& sc_list) {
@@ -638,10 +661,15 @@ void LiveActivity::processSuperChatForSidebar(const std::vector<LiveDanmakuItem>
         if (!state->isActive.load(std::memory_order_acquire) || !this->shouldShowSidebar() || !this->liveDanmakuContainer) {
             return;
         }
-        
+
+        int scIdx = 0;
         for (const auto& sc : sc_list) {
+            char scStage[32];
+            std::snprintf(scStage, sizeof(scStage), "lws-sc:row#%d", scIdx);
+            brls::xbox360perf::stageMark(scStage);
             auto* item = LiveDanmakuItemView::create();
             item->setDanmaku(sc);
+            scIdx++;
             
             // 将新SC添加到侧边栏顶部
             if (this->liveDanmakuContainer->getChildren().size() > 0) {
@@ -692,7 +720,7 @@ void LiveActivity::processSuperChatForSidebar(const std::vector<LiveDanmakuItem>
         if (this->pinnedSuperChats.size() > 0 && this->scExpiryCheckIter == 0) {
             this->startSuperChatExpiryTimer();
         }
-    });
+    }, "lws-sc");
 }
 
 // 添加SC置顶

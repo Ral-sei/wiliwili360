@@ -220,6 +220,7 @@ void BilibiliClient::get_pgc_filter(const std::string& index_type,
 }
 
 /// 主页 追番/影视 获取全部分类
+// Xbox: CPR runs this body on its dedicated XDK worker thread.
 void BilibiliClient::get_pgc_all_filter(const std::function<void(PGCIndexFilters)>& callback,
                                         const ErrorCallback& error) {
     cpr::async([callback, error]() {

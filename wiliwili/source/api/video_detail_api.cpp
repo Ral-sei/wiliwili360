@@ -56,12 +56,23 @@ void BilibiliClient::get_webmask(const std::string& url, int64_t rangeStart, int
     auto session = HTTP::createSession();
     session->SetRange(cpr::Range{start, end});
     session->SetUrl(cpr::Url{url});
+#if defined(PLATFORM_XBOX360)
+    const std::uint64_t t_submit = brls::xbox360perf::nowUsec();
+#endif
     session->GetCallback<>(
-        [callback, error](const cpr::Response& r) {
+        [callback, error
+#if defined(PLATFORM_XBOX360)
+            , session, t_submit, url
+#endif
+        ](const cpr::Response& r) {
+#if defined(PLATFORM_XBOX360)
+            // P0 §5.5-5：webmask 走直连 session，绕过 _cpr_get 的计时。
+            BILI_X360_NETLOG("GET", url, session, r, t_submit);
+#endif
 #if defined(__cpp_exceptions)
             try {
 #endif
-                callback(r.text);
+                callback(HTTP::decodeText(r));
 #if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG("Network error. [Status code: " + std::to_string(r.status_code) + " ]", r.status_code);
@@ -304,8 +315,23 @@ void BilibiliClient::get_danmaku(uint64_t cid, const std::function<void(std::str
     auto session = HTTP::createSession();
     session->SetUrl(cpr::Url{HTTP::PROTOCOL + Api::VideoDanmaku});
     session->SetParameters(cpr::Parameters({{"oid", std::to_string(cid)}}));
+#if defined(PLATFORM_XBOX360)
+    const std::uint64_t t_submit = brls::xbox360perf::nowUsec();
+#endif
     session->GetCallback<>(
-        [callback, error](const cpr::Response& r) {
+        [callback, error
+#if defined(PLATFORM_XBOX360)
+            , session, t_submit
+#endif
+        ](const cpr::Response& r) {
+#if defined(PLATFORM_XBOX360)
+            // P0 §5.5-5：弹幕 list.so 直连请求（deflate 解压在 cb 内）。
+            BILI_X360_NETLOG("GET", HTTP::PROTOCOL + Api::VideoDanmaku, session, r, t_submit);
+#endif
+            if (r.error) {
+                ERROR_MSG(r.error.message, -1);
+                return;
+            }
             if (r.status_code != 200) {
                 ERROR_MSG(r.error.message, r.status_code);
                 return;
@@ -313,7 +339,8 @@ void BilibiliClient::get_danmaku(uint64_t cid, const std::function<void(std::str
 #if defined(__cpp_exceptions)
             try {
 #endif
-                callback(r.text);
+                // list.so 恒返回 Content-Encoding: deflate，curl fork 不解压
+                callback(HTTP::decodeText(r));
 #if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
                 ERROR_MSG(e.what(), -1);
@@ -328,8 +355,19 @@ void BilibiliClient::get_highlight_progress(uint64_t cid,
     auto session = HTTP::createSession();
     session->SetUrl(cpr::Url{HTTP::PROTOCOL + Api::VideoHighlight});
     session->SetParameters(cpr::Parameters({{"cid", std::to_string(cid)}}));
+#if defined(PLATFORM_XBOX360)
+    const std::uint64_t t_submit = brls::xbox360perf::nowUsec();
+#endif
     session->GetCallback<>(
-        [callback, error](const cpr::Response& r) {
+        [callback, error
+#if defined(PLATFORM_XBOX360)
+            , session, t_submit
+#endif
+        ](const cpr::Response& r) {
+#if defined(PLATFORM_XBOX360)
+            // P0 §5.5-5：高能进度条直连请求。
+            BILI_X360_NETLOG("GET", HTTP::PROTOCOL + Api::VideoHighlight, session, r, t_submit);
+#endif
             if (r.status_code != 200) {
                 ERROR_MSG(r.error.message, r.status_code);
                 return;
@@ -337,7 +375,7 @@ void BilibiliClient::get_highlight_progress(uint64_t cid,
 #if defined(__cpp_exceptions)
             try {
 #endif
-                nlohmann::json res = nlohmann::json::parse(r.text);
+                nlohmann::json res = nlohmann::json::parse(HTTP::decodeText(r));
                 callback(res.get<VideoHighlightProgress>());
 #if defined(__cpp_exceptions)
             } catch (const std::exception& e) {
@@ -357,8 +395,19 @@ void BilibiliClient::get_video_snapshot(const std::string& bvid, uint64_t cid,
         {"cid", std::to_string(cid)},
         {"index", "1"},
     }));
+#if defined(PLATFORM_XBOX360)
+    const std::uint64_t t_submit = brls::xbox360perf::nowUsec();
+#endif
     session->GetCallback<>(
-        [callback, error](const cpr::Response& r) {
+        [callback, error
+#if defined(PLATFORM_XBOX360)
+            , session, t_submit
+#endif
+        ](const cpr::Response& r) {
+#if defined(PLATFORM_XBOX360)
+            // P0 §5.5-5：视频快照接口直连请求。
+            BILI_X360_NETLOG("GET", HTTP::PROTOCOL + Api::VideoSnapshot, session, r, t_submit);
+#endif
             if (r.status_code != 200) {
                 ERROR_MSG(r.error.message, r.status_code);
                 return;
@@ -366,7 +415,7 @@ void BilibiliClient::get_video_snapshot(const std::string& bvid, uint64_t cid,
 #if defined(__cpp_exceptions)
             try {
 #endif
-                nlohmann::json res = nlohmann::json::parse(r.text);
+                nlohmann::json res = nlohmann::json::parse(HTTP::decodeText(r));
                 if (res["code"] != 0) {
                     ERROR_MSG(res["message"].get<std::string>(), res["code"].get<int>());
                     return;
@@ -384,12 +433,23 @@ void BilibiliClient::get_subtitle(const std::string& link, const std::function<v
                                   const ErrorCallback& error) {
     auto session = HTTP::createSession();
     session->SetUrl(cpr::Url{link});
+#if defined(PLATFORM_XBOX360)
+    const std::uint64_t t_submit = brls::xbox360perf::nowUsec();
+#endif
     session->GetCallback<>(
-        [callback, error](const cpr::Response& r) {
+        [callback, error
+#if defined(PLATFORM_XBOX360)
+            , session, t_submit, link
+#endif
+        ](const cpr::Response& r) {
+#if defined(PLATFORM_XBOX360)
+            // P0 §5.5-5：字幕接口直连请求。
+            BILI_X360_NETLOG("GET", link, session, r, t_submit);
+#endif
 #if defined(__cpp_exceptions)
             try {
 #endif
-                nlohmann::json res = nlohmann::json::parse(r.text);
+                nlohmann::json res = nlohmann::json::parse(HTTP::decodeText(r));
                 callback(res.get<SubtitleData>());
 #if defined(__cpp_exceptions)
             } catch (const std::exception& e) {

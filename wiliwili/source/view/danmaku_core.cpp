@@ -5,6 +5,7 @@
 #include <borealis/core/logger.hpp>
 #include <borealis/core/application.hpp>
 #include <borealis/core/thread.hpp>
+#include <borealis/platforms/xbox360/xbox360_perf.hpp>
 
 #include <pystring.h>
 #include <cstdlib>
@@ -206,9 +207,7 @@ void DanmakuItem::draw(NVGcontext *vg, float x, float y, float alpha, bool multi
 
     // background
     if (DanmakuCore::DANMAKU_STYLE_FONT != DanmakuFontStyle::DANMAKU_FONT_PURE) {
-#if !defined(PLATFORM_XBOX360)
         nvgFontDilate(vg, dilate);
-#endif
         nvgFontBlur(vg, blur);
         nvgFillColor(vg, a(borderColor, alpha));
         if (multiLine)
@@ -218,9 +217,7 @@ void DanmakuItem::draw(NVGcontext *vg, float x, float y, float alpha, bool multi
     }
 
     // content
-#if !defined(PLATFORM_XBOX360)
     nvgFontDilate(vg, 0.0f);
-#endif
     nvgFontBlur(vg, 0.0f);
     nvgFillColor(vg, a(color, alpha));
     if (multiLine)
@@ -299,12 +296,26 @@ void DanmakuCore::reset() {
     danmakuMutex.unlock();
 }
 
-void DanmakuCore::loadDanmakuData(const std::vector<DanmakuItem> &data) {
+void DanmakuCore::loadDanmakuData(std::vector<DanmakuItem> &&data) {
+    // Only the ownership transfer and the small UI refresh belong on the main
+    // thread.  Parsing and sorting are deliberately done by the request
+    // worker before this function is queued.
+    brls::xbox360perf::SyncScope syncScope(brls::xbox360perf::SYNC_DANMAKU);
+    const bool hasData = !data.empty();
+    std::vector<DanmakuItem> oldData;
     danmakuMutex.lock();
-    this->danmakuData = data;
-    if (!data.empty()) danmakuLoaded = true;
-    std::sort(danmakuData.begin(), danmakuData.end());
+    // Do not destroy the previous list as part of vector move-assignment on
+    // the UI thread.  On Xenon, releasing thousands of DanmakuItem strings
+    // can hold the process heap lock for multiple video frames.
+    oldData.swap(this->danmakuData);
+    this->danmakuData.swap(data);
+    if (hasData) danmakuLoaded = true;
     danmakuMutex.unlock();
+
+    // Keep the old allocation alive until the background task owns it.  The
+    // empty task is intentional: destruction happens when its capture is
+    // released by the task loop, not while the video frame is being built.
+    brls::async([oldData = std::move(oldData)]() mutable { oldData.clear(); });
 
     // 更新显示总行数等信息
     this->refresh();

@@ -161,7 +161,26 @@ CHUNKcode Curl_httpchunk_read(struct connectdata *conn,
           return CHUNKE_ILLEGAL_HEX ;
         }
 
+ #if defined(_XBOX) || defined(PLATFORM_XBOX360)
+        {
+          const unsigned char *hex = (const unsigned char *)ch->hexbuffer;
+          ch->datasize = 0;
+          while(*hex) {
+            unsigned digit;
+            if(*hex >= '0' && *hex <= '9') digit = (unsigned)(*hex - '0');
+            else if(*hex >= 'a' && *hex <= 'f') digit = (unsigned)(*hex - 'a' + 10);
+            else if(*hex >= 'A' && *hex <= 'F') digit = (unsigned)(*hex - 'A' + 10);
+            else break;
+            if(ch->datasize > (CURL_OFF_T_MAX - (curl_off_t)digit) / 16)
+              return CHUNKE_ILLEGAL_HEX;
+            ch->datasize = ch->datasize * 16 + (curl_off_t)digit;
+            hex++;
+          }
+          endptr = (char *)hex;
+        }
+ #else
         ch->datasize=curlx_strtoofft(ch->hexbuffer, &endptr, 16);
+ #endif
         if((ch->datasize == CURL_OFF_T_MAX) && (errno == ERANGE))
           /* overflow is an error */
           return CHUNKE_ILLEGAL_HEX;

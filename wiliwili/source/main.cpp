@@ -64,7 +64,7 @@ int main(int argc, char* argv[]) {
 
     brls::Application::createWindow("wiliwili");
     brls::Logger::info("createWindow done");
-#ifdef __XBOX360__
+#if defined(__XBOX360__) && X360_RUNTIME_PROBES
     // Dump the Itanium RTTI vtable slots before XML inflation. This identifies
     // a bad XDK typeinfo table directly on hardware instead of relying on the
     // later illegal-indirect-call address alone.
@@ -90,14 +90,7 @@ int main(int argc, char* argv[]) {
     brls::Application::getPlatform()->disableScreenDimming(false);
 
     if (brls::Application::getPlatform()->isApplicationMode()) {
-#if defined(PLATFORM_XBOX360) || defined(__XBOX360__)
-        // Keep the first Xbox 360 vertical slice offline and deterministic.
-        // HintActivity exercises XML inflation, images, focus navigation and
-        // the GalleryView without requiring the unfinished API/player layers.
-        Intent::openHint();
-#else
         Intent::openMain();
-#endif
         // Uncomment these lines to debug activities
         //        Intent::openBV("BV1Da411Y7U4");  // 弹幕防遮挡 (横屏)
         //        Intent::openBV("BV1iN4y1m7J3");  // 弹幕防遮挡 (竖屏)

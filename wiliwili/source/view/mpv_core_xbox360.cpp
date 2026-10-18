@@ -1,3 +1,19 @@
+// NOT COMPILED. Kept only as the M3-era fallback if the libmpv route (M5) is
+// ever rolled back — do not read this file as the current Xbox behaviour.
+//
+// This was the "libmpv not wired up yet" MPVCore: a header-shaped stub that
+// answers isValid() == false and swallows every playback call. Since M5, the
+// real wiliwili/source/view/mpv_core.cpp is what runs on Xbox (it drives libmpv
+// through the MPV_SW_RENDER software renderer), and this file would define the
+// exact same MPVCore members — so building both is a duplicate symbol.
+// CMakeLists.txt therefore list(REMOVE_ITEM)s it out of MAIN_SRC on Xbox. If
+// you re-enable it, you must remove the real mpv_core.cpp from the Xbox build
+// in the same change, or the link fails.
+//
+// Historical note: because it is excluded from the build, the
+// #if defined(PLATFORM_XBOX360) guard below is inert — it exists only so the
+// file still parses if someone compiles it by hand on another platform.
+
 #include "view/mpv_core.hpp"
 
 #if defined(PLATFORM_XBOX360)

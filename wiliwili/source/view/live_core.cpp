@@ -410,9 +410,7 @@ void LiveDanmakuCore::draw(NVGcontext *vg, float x, float y, float width, float 
             float dx, dy;
             dx = dy = DanmakuCore::DANMAKU_STYLE_FONT == DanmakuFontStyle::DANMAKU_FONT_INCLINE;
             nvgFontBlur(vg, DanmakuCore::DANMAKU_STYLE_FONT == DanmakuFontStyle::DANMAKU_FONT_SHADOW);
-#if !defined(PLATFORM_XBOX360)
             nvgFontDilate(vg, DanmakuCore::DANMAKU_STYLE_FONT == DanmakuFontStyle::DANMAKU_FONT_STROKE);
-#endif
 
             nvgFillColor(vg, border_color);
             for (const auto &j : v) {
@@ -435,9 +433,7 @@ void LiveDanmakuCore::draw(NVGcontext *vg, float x, float y, float width, float 
                 }
             }
             nvgFontBlur(vg, 0.0f);
-#if !defined(PLATFORM_XBOX360)
             nvgFontDilate(vg, 0.0f);
-#endif
         }
 
         // 绘制主体

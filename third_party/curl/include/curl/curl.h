@@ -59,8 +59,12 @@
 #if !(defined(_WINSOCKAPI_) || defined(_WINSOCK_H) || defined(__LWIP_OPT_H__))
 /* The check above prevents the winsock2 inclusion if winsock.h already was
    included, since they can't co-exist without problems */
+#if defined(_XBOX)
+#include <winsockx.h>
+#else
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#endif
 #endif
 #endif
 

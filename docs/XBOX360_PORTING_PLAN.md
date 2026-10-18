@@ -349,8 +349,9 @@ library/borealis/library/lib/platforms/xbox360/
   （`-fno-exceptions` 下不应到达，到达即 abort）。这些是真实实现而非占位。
 - 自定义主题目录扫描和 mpv shader pack load/save 暂时 no-op；资源打包和 Xbox
   文件系统目录创建完成后恢复。
-- D3D NanoVG 尚无 borealis fork 的 `nvgFontDilate` 扩展；Xbox 暂时跳过字体膨胀，
-  因此弹幕 stroke 效果未验收。
+- ~~D3D NanoVG 尚无 borealis fork 的 `nvgFontDilate` 扩展；Xbox 暂时跳过字体膨胀，
+  因此弹幕 stroke 效果未验收。~~ **已修复（2026-10-13）**：见 §10「弹幕描边
+  (font dilate) 在 Xbox 360 上恢复」。
 - Windows `dbghelp` minidump 明确不用于 Xbox；Xbox 崩溃日志/转储仍待独立实现。
 - `VideoProfile` 在 M3 不读取 libmpv 的 `mpv_node` 缓存和编解码统计，Xbox 上暂时
   显示 `Unavailable`；M5/M6 接入 libmpv 或 Xbox360PlayerCore 后改为读取等价播放器诊断状态。
@@ -844,3 +845,35 @@ XDK 路径、构建 OXDK libc++，并将 OXDK 转换缓存放在构建目录。�
 本次验证产物为 `build-xbox360-debian/wiliwili`，链接输出显示 147 个对象、9 个
 XDK 库，基址 `0x82000000`。该记录只覆盖交叉编译和链接，Xenia/真实开发机部署仍
 需单独验收。
+
+#### 2026-10-13 弹幕描边（font dilate）在 Xbox 360 上恢复
+
+**症状**：设置页把弹幕字体样式设为「描边（stroke）」后无任何视觉效果；描边本应由
+`nvgFontDilate(vg, 1)` 放大背景字形、让边框色从主体文字后透出，但 Xbox 构建此前
+在 `danmaku_core.cpp` / `live_core.cpp` 用 `#if !defined(PLATFORM_XBOX360)` 直接
+跳过了该调用，于是背景描边与主体同尺寸、完全被盖住。
+
+**根因与两处修复**：
+
+1. **上层调用被裁剪**：Xbox 分支不再跳过 `nvgFontDilate`，`danmaku_core.cpp`（点播
+   弹幕）与 `live_core.cpp`（直播弹幕）现与其它平台一致调用。当前默认构建
+   （`XBOX360_NANOVG_D3D9=OFF`）链接的是 borealis fork 的 NanoVG 核心
+   （`lib/extern/nanovg/nanovg.c`），该核心本就带 `nvgFontDilate`，因此仅去除守卫
+   即可生效。
+2. **vendored D3D9 核心补齐扩展**：`XBOX360_NANOVG_D3D9=ON` 时使用
+   `lib/extern/nanovg_d3d/src/nanovg.c`，其 fontstash 缺少 dilate。已按 fork 实现
+   等价移植：`FONSstate/FONSglyph/FONStextIter` 增加 `dilate`，新增
+   `fonsSetDilate()`、`fons__maxRows/maxCols/maxDiagUp/maxDiagDown`、
+   `fons__dilate()`，并在 `fons__getGlyph()`（字形缓存键含 dilate、pad 计入
+   dilate）与全部文本函数接入；`nanovg.c` 增加 `fontDilate` 状态、
+   `nvgFontDilate()` 及 7 处 `fonsSetDilate()`；`nanovg.h` 增加声明。
+
+**验证**（Xenon clang，本机 WSL）：
+
+- 默认配置 `build-xbox360-local`：424/424 编译 + 链接通过，产出
+  `wiliwili`（24,457,216 B，162 objects + 9 XDK 库）。
+- `XBOX360_NANOVG_D3D9=ON` 配置 `build-xbox360-nanovg-d3d-on`：编译 + 链接通过
+  （24,391,680 B）。`nanovg_d3d/src/nanovg.c.o` 定义 `nvgFontDilate`/`fonsSetDilate`，
+  `danmaku_core.cpp.o` 正确引用 `nvgFontDilate`。
+- 两配置均只做交叉编译/链接验证，未上机确认描边观感（实机验收待补）。
+

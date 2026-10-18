@@ -38,6 +38,9 @@
 /* ----------------------------------------------------------------
  *  Symmetric ciphers (for TLS)
  * ---------------------------------------------------------------- */
+/* Avoid racy runtime generation of process-global AES tables when multiple
+ * Xbox TLS handshakes start concurrently. */
+#define MBEDTLS_AES_ROM_TABLES
 #define MBEDTLS_AES_C
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_GCM_C
@@ -59,6 +62,9 @@
 #define MBEDTLS_BIGNUM_C
 #define MBEDTLS_RSA_C
 #define MBEDTLS_ECP_C
+/* #11（§5.8）：启用 NIST 专用点运算公式（secp256r1 的 dbl/add 更快），
+   实测空闲态 ecp mul 基线 142~713ms，先压这条与分配器无关的计算成本。 */
+#define MBEDTLS_ECP_NIST_OPTIM
 #define MBEDTLS_ECDH_C
 #define MBEDTLS_ECDSA_C
 #define MBEDTLS_PK_C

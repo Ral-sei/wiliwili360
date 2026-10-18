@@ -687,6 +687,11 @@ void SettingActivity::onContentAvailable() {
                        ProgramConfig::instance().setSettingItem(SettingItem::PLAYER_HWDEC, value);
                        if (MPVCore::HARDWARE_DEC == value) return;
                        MPVCore::HARDWARE_DEC = value;
+#if defined(PLATFORM_XBOX360) && X360_XAV
+                       // Xbox 360 的硬件解码走 XAV（实验性）：依赖系统「可选媒体更新」
+                       // 编解码包，未安装时 XAV 的 Open 会直接失败。
+                       if (value) brls::Application::notify("wiliwili/setting/app/playback/hwdec_experimental"_i18n);
+#endif
                        MPVCore::instance().restart();
                    });
 #endif

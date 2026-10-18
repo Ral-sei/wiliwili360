@@ -14,6 +14,7 @@
         "low_quality": "낮은 품질의 디코딩(CPU 사용량이 적음)",
         "in_memory_cache": "메모리 캐시",
         "hwdec": "하드웨어 디코드",
+        "hwdec_experimental": "실험적 기능: 시스템 \"선택적 미디어 업데이트\" 코덱 팩이 필요하며 재생되지 않을 수 있습니다",
         "auto_play": "비디오 세부 정보 페이지에서 자동 재생",
         "auto_fullscreen": "플레이어 진입 시 자동 전체 화면",
         "exit_fullscreen": "재생 종료 시 전체 화면 종료",
@@ -484,6 +485,7 @@
   },
   "dialog": {
     "not_supported": "지원하지 않음",
+    "ime_unavailable": "이 빌드에서는 텍스트 입력을 사용할 수 없습니다",
     "quit_hint": "앱 종료 중..."
   }
 }

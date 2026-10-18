@@ -5,6 +5,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <atomic>
 #include <vector>
 #include <string>
 #include <cstdlib>
@@ -12,21 +13,9 @@
 #include <borealis/core/geometry.hpp>
 #include <borealis/core/singleton.hpp>
 #include <borealis/core/logger.hpp>
-#if defined(PLATFORM_XBOX360)
-struct mpv_handle {};
-struct mpv_render_context {};
-struct mpv_node {};
-enum {
-    MPV_ERROR_UNKNOWN_FORMAT = -11,
-    MPV_ERROR_LOADING_FAILED = -12
-};
-inline const char* mpv_error_string(int) { return "mpv unavailable on Xbox 360"; }
-#else
 #include <mpv/client.h>
 #include <mpv/render.h>
-#endif
-#if defined(PLATFORM_XBOX360)
-#elif defined(MPV_SW_RENDER)
+#if defined(MPV_SW_RENDER)
 #elif defined(BOREALIS_USE_DEKO3D)
 #include <mpv/render_dk3d.h>
 #elif defined(BOREALIS_USE_D3D11)
@@ -96,6 +85,7 @@ typedef void (*mpvRenderContextReportSwapFunc)(mpv_render_context *ctx);
 typedef uint64_t (*mpvRenderContextUpdateFunc)(mpv_render_context *ctx);
 typedef void (*mpvRenderContextFreeFunc)(mpv_render_context *ctx);
 typedef unsigned long (*mpvClientApiVersionFunc)();
+typedef int (*mpvRequestLogMessagesFunc)(mpv_handle *ctx, const char *min_level);
 
 extern mpvSetOptionStringFunc mpvSetOptionString;
 extern mpvObservePropertyFunc mpvObserveProperty;
@@ -119,6 +109,7 @@ extern mpvRenderContextReportSwapFunc mpvRenderContextReportSwap;
 extern mpvRenderContextUpdateFunc mpvRenderContextUpdate;
 extern mpvRenderContextFreeFunc mpvRenderContextFree;
 extern mpvClientApiVersionFunc mpvClientApiVersion;
+extern mpvRequestLogMessagesFunc mpvRequestLogMessages;
 #else
 #define mpvSetOptionString mpv_set_option_string
 #define mpvObserveProperty mpv_observe_property
@@ -142,6 +133,7 @@ extern mpvClientApiVersionFunc mpvClientApiVersion;
 #define mpvRenderContextUpdate mpv_render_context_update
 #define mpvRenderContextFree mpv_render_context_free
 #define mpvClientApiVersion mpv_client_api_version
+#define mpvRequestLogMessages mpv_request_log_messages
 #endif
 
 class MPVCore : public brls::Singleton<MPVCore> {
@@ -166,7 +158,7 @@ public:
 
     int64_t getVolume() const;
 
-    bool isValid();
+    bool isValid() const;
 
     // todo: remove these sync function
     std::string getString(const std::string &key);
@@ -414,24 +406,44 @@ private:
     mpv_handle *mpv                 = nullptr;
     mpv_render_context *mpv_context = nullptr;
     brls::Rect rect                 = {0, 0, 1920, 1080};
+#if defined(MPV_SW_RENDER)
 #if defined(PLATFORM_XBOX360)
-    // No libmpv is linked on Xbox 360 yet; rendering is supplied by the
-    // platform player integration in a later pass.
-#elif defined(MPV_SW_RENDER)
+    // Xbox 360: libmpv hands us a planar YUV420P frame in a single contiguous
+    // I420 buffer (see Xbox360YUVRenderer) and the GPU does the YUV -> RGB
+    // conversion, which is far cheaper on Xenon than swscale's RGBA conversion.
+    // Bytes per luma sample; the chroma planes are derived from `pitch`.
+    const int PIXCEL_SIZE          = 1;
+    const char *sw_format          = "yuv420p";
+    // Xbox 360 (1:1 surface): true while the surface size derives from
+    // video-params, false while it is the rect fallback.  The 250ms probe in
+    // draw() re-runs setFrameSize while params are known but this is false,
+    // so a same-resolution consecutive video cannot stay stuck on the rect
+    // surface after a rect change during load: comparing only against the
+    // recorded last video size would suppress that re-run.
+    bool swSurfaceFromVideo        = false;
+#else
     const int PIXCEL_SIZE          = 4;
-    int nvg_image                  = 0;
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
     const char *sw_format          = "abgr";
 #else
     const char *sw_format          = "rgba";
 #endif
+#endif
+    int nvg_image                  = 0;
     int sw_size[2]                 = {1920, 1080};
     size_t pitch                   = PIXCEL_SIZE * sw_size[0];
     void *pixels                   = nullptr;
+    // Raw malloc() result backing `pixels`; differs on Xbox 360 where the
+    // buffer is 128-byte (cache line) aligned for libswscale.
+    void *pixels_storage           = nullptr;
+    size_t pixels_bytes            = 0;
     bool redraw                    = false;
-    mpv_render_param mpv_params[5] = {
+    std::atomic<bool> renderPending{false};
+    int blockForTargetTime          = 0;
+    mpv_render_param mpv_params[6] = {
         {MPV_RENDER_PARAM_SW_SIZE, &sw_size[0]}, {MPV_RENDER_PARAM_SW_FORMAT, (void *)sw_format},
         {MPV_RENDER_PARAM_SW_STRIDE, &pitch},    {MPV_RENDER_PARAM_SW_POINTER, pixels},
+        {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &blockForTargetTime},
         {MPV_RENDER_PARAM_INVALID, nullptr},
     };
 #elif defined(BOREALIS_USE_DEKO3D)

@@ -74,6 +74,15 @@
 #include "vtls/vtls.h" /* for Curl_ssl_check_cxn() */
 #include "progress.h"
 #include "warnless.h"
+
+#ifdef _XBOX
+extern void DbgPrint(const char *fmt, ...);
+#if !defined(X360_RUNTIME_PROBES) || !X360_RUNTIME_PROBES
+/* Xbox 360 诊断探针总开关（CMake XBOX360_RUNTIME_PROBES，默认 OFF）：关闭时本
+   文件的 DbgPrint 探针编译为空，避免 [curl] 行刷 XBDM 日志。 */
+#define DbgPrint(...) ((void)0)
+#endif
+#endif
 #include "conncache.h"
 #include "multihandle.h"
 
@@ -108,6 +117,14 @@ static void
 tcpkeepalive(struct SessionHandle *data,
              curl_socket_t sockfd)
 {
+#if defined(_XBOX)
+  /* XNet exposes SO_KEEPALIVE but rejects the TCP keepalive tuning options
+   * with WSAENOPROTOOPT (10042).  Curl treats these as optional settings;
+   * avoid emitting a misleading XNet warning on every connection. */
+  (void)data;
+  (void)sockfd;
+  return;
+#else
   int optval = data->set.tcp_keepalive?1:0;
 
   /* only set IDLE and INTVL if setting KEEPALIVE is successful */
@@ -159,6 +176,7 @@ tcpkeepalive(struct SessionHandle *data,
 #endif
 #endif
   }
+#endif
 }
 
 static CURLcode
@@ -772,6 +790,9 @@ CURLcode Curl_is_connected(struct connectdata *conn,
       }
     }
     else if(result == CURL_CSELECT_OUT) {
+#ifdef _XBOX
+      DbgPrint("[curl] socket=%d writable", (int)conn->tempsock[i]);
+#endif
       if(verifyconnect(conn->tempsock[i], &error)) {
         /* we are connected with TCP, awesome! */
         int other = i ^ 1;
@@ -802,8 +823,12 @@ CURLcode Curl_is_connected(struct connectdata *conn,
 
         return CURLE_OK;
       }
-      else
+      else {
+#ifdef _XBOX
+        DbgPrint("[curl] socket=%d verify failed err=%d", (int)conn->tempsock[i], error);
+#endif
         infof(data, "Connection failed\n");
+      }
     }
     else if(result & CURL_CSELECT_ERR)
       (void)verifyconnect(conn->tempsock[i], &error);
@@ -1073,6 +1098,10 @@ singleipconnect(struct connectdata *conn,
 #endif
 #endif
       res = CURLE_OK;
+#ifdef _XBOX
+      DbgPrint("[curl] socket=%d connect pending ip=%s err=%d", (int)sockfd,
+               ipaddress, error);
+#endif
       break;
 
     default:
@@ -1086,6 +1115,11 @@ singleipconnect(struct connectdata *conn,
       res = CURLE_COULDNT_CONNECT;
     }
   }
+#ifdef _XBOX
+  else {
+    DbgPrint("[curl] socket=%d connect immediate ip=%s", (int)sockfd, ipaddress);
+  }
+#endif
 
   if(!res)
     *sockp = sockfd;
@@ -1298,6 +1332,20 @@ CURLcode Curl_socket(struct connectdata *conn,
   if(*sockfd == CURL_SOCKET_BAD)
     /* no socket, no connection */
     return CURLE_COULDNT_CONNECT;
+
+#ifdef _XBOX
+  /* XNet requires public/untrusted connections to opt out of its per-socket
+     encryption policy. XNetStartup(BYPASS_SECURITY) alone is insufficient:
+     an unmarked socket can appear to connect while silently dropping the
+     peer's replies. This is the same option used by the Xbox HTTP client. */
+  {
+    BOOL unencrypted = TRUE;
+    int option_result = setsockopt(*sockfd, SOL_SOCKET, 0x5801,
+                                   (const char *)&unencrypted, sizeof(unencrypted));
+    DbgPrint("[curl] socket=%d unencrypted ret=%d err=%d", (int)*sockfd,
+             option_result, option_result ? WSAGetLastError() : 0);
+  }
+#endif
 
 #if defined(ENABLE_IPV6) && defined(HAVE_SOCKADDR_IN6_SIN6_SCOPE_ID)
   if(conn->scope && (addr->family == AF_INET6)) {

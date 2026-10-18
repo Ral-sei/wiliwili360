@@ -5,6 +5,9 @@
 #include <nlohmann/json.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
+#include <borealis/core/logger.hpp>
+#include <map>
+#include <string>
 #include "bilibili.h"
 #include "bilibili/api.h"
 #include "bilibili/util/md5.hpp"
@@ -20,6 +23,68 @@
 #include "bilibili/result/mine_later_result.h"
 
 namespace bilibili {
+
+namespace {
+
+/**
+ * 从响应原始头里解析全部 Set-Cookie，只取 `name=value` 首段，写入 out（同名覆盖）。
+ * 返回本次解析到的条数。
+ *
+ * 不能只信 cpr 从 CURLINFO_COOKIELIST 读出的 cookie jar：Xbox 360 上 XDK 的
+ * time() 返回 `(epoch << 32) | fraction` 形式的打包值，third_party/curl/lib/cookie.c
+ * 的过期清理据此把带 Expires 的 Cookie（SESSDATA / bili_jct 等）立刻判定为过期并删除，
+ * 于是 QR 登录明明返回 code=0，r.cookies 却拿不到登录 Cookie，后续请求仍是“账号未登录”。
+ * 原始响应头不受影响，直接解析即可；与 jar 结果合并后本函数的值优先。
+ */
+size_t parseSetCookies(const std::string& rawHeader, std::map<std::string, std::string>& out) {
+    size_t found  = 0;
+    size_t pos    = 0;
+    size_t keyLen = 11;  // "set-cookie:"
+    while (pos < rawHeader.size()) {
+        size_t eol = rawHeader.find('\n', pos);
+        if (eol == std::string::npos) eol = rawHeader.size();
+        size_t end = eol;
+        if (end > pos && rawHeader[end - 1] == '\r') end--;
+        if (end - pos >= keyLen) {
+            bool match = true;
+            for (size_t i = 0; i < keyLen; ++i) {
+                char c = rawHeader[pos + i];
+                if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+                if (c != "set-cookie:"[i]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                size_t begin = pos + keyLen;
+                while (begin < end && (rawHeader[begin] == ' ' || rawHeader[begin] == '\t')) begin++;
+                size_t semi = begin;
+                while (semi < end && rawHeader[semi] != ';') semi++;
+                size_t eq = begin;
+                while (eq < semi && rawHeader[eq] != '=') eq++;
+                if (eq > begin && eq + 1 < semi) {
+                    size_t nameEnd = eq;
+                    while (nameEnd > begin && (rawHeader[nameEnd - 1] == ' ' || rawHeader[nameEnd - 1] == '\t'))
+                        nameEnd--;
+                    size_t valueBegin = eq + 1;
+                    while (valueBegin < semi && (rawHeader[valueBegin] == ' ' || rawHeader[valueBegin] == '\t'))
+                        valueBegin++;
+                    size_t valueEnd = semi;
+                    while (valueEnd > valueBegin && (rawHeader[valueEnd - 1] == ' ' || rawHeader[valueEnd - 1] == '\t'))
+                        valueEnd--;
+                    if (nameEnd > begin && valueEnd > valueBegin) {
+                        out[rawHeader.substr(begin, nameEnd - begin)] = rawHeader.substr(valueBegin, valueEnd - valueBegin);
+                        found++;
+                    }
+                }
+            }
+        }
+        pos = eol + 1;
+    }
+    return found;
+}
+
+}  // namespace
 
 /// get qrcode for login
 void BilibiliClient::get_login_url(const std::function<void(std::string, std::string)>& callback,
@@ -76,14 +141,23 @@ void BilibiliClient::get_login_info_v2(const std::string& qrcodeKey, const std::
                                        const ErrorCallback& error) {
     auto uuid   = BilibiliClient::genRandomUuid();
 
-    HTTP::COOKIES = {{{"appkey", BILIBILI_APP_KEY},
-                      {"mobi_app", "pc_electron"},
-                      {"device", "mac"},
-                      {"innersign", "0"},
-                      {"buvid3", uuid},
-                      {"device_id", deviceID},
-                      {"device_name", deviceName}},
-                     false};
+    // 每次轮询都要带设备字段，但不能像原实现那样把全局 Cookie 整体换成只有设备字段的
+    // 集合：QR 对话框打开期间后台请求（历史/动态/用户信息）仍在发出，换掉 Cookie 后
+    // 这些请求会立刻变成“用户未登录”，重新打开登录框时更是全站掉登录态。
+    // 这里保留已有会话 Cookie，只补上本次轮询缺的设备字段（同名时以已有会话为准）。
+    const std::map<std::string, std::string> deviceCookies = {
+        {"appkey", BILIBILI_APP_KEY}, {"mobi_app", "pc_electron"}, {"device", "mac"},
+        {"innersign", "0"},           {"buvid3", uuid},            {"device_id", deviceID},
+        {"device_name", deviceName},
+    };
+    std::map<std::string, std::string> mergedCookies;
+    for (const auto& cookie : HTTP::COOKIES) {
+        if (!cookie.GetName().empty()) mergedCookies.emplace(cookie.GetName(), cookie.GetValue());
+    }
+    for (const auto& cookie : deviceCookies) mergedCookies.emplace(cookie.first, cookie.second);
+
+    HTTP::COOKIES = {false};
+    for (const auto& cookie : mergedCookies) HTTP::COOKIES.emplace_back({cookie.first, cookie.second});
     // Manually set cookie, because cpr's cookie algorithm does not conform to the rfc6265
     HTTP::HEADERS["cookie"] = HTTP::getEncodedCookie(HTTP::COOKIES);
 
@@ -93,21 +167,35 @@ void BilibiliClient::get_login_info_v2(const std::string& qrcodeKey, const std::
 #if defined(__cpp_exceptions)
             try {
 #endif
-                HTTP::COOKIES      = {false};
                 nlohmann::json res = nlohmann::json::parse(r.text);
                 auto data          = res.at("data").get<QrLoginInfoResultV2>();
                 if (data.status) {
                     std::map<std::string, std::string> cookies;
-                    cookies["_uuid"] = uuid;
-                    HTTP::COOKIES.emplace_back({"_uuid", cookies["_uuid"]});
+                    cookies["_uuid"]  = uuid;
                     cookies["buvid3"] = BilibiliClient::genRandomBuvid3();
-                    HTTP::COOKIES.emplace_back({"buvid3", cookies["buvid3"]});
+                    size_t jarCount   = 0;
                     for (const auto& cookie : r.cookies) {
+                        if (cookie.GetName().empty() || cookie.GetValue().empty()) continue;
                         cookies[cookie.GetName()] = cookie.GetValue();
-                        HTTP::COOKIES.emplace_back({cookie.GetName(), cookie.GetValue()});
+                        jarCount++;
                     }
+                    // cookie jar 在 Xbox 上可能缺登录 Cookie，原始响应头一定带全量 Set-Cookie
+                    const size_t rawCount = parseSetCookies(r.raw_header, cookies);
+
+                    HTTP::COOKIES = {false};
+                    for (const auto& cookie : cookies) HTTP::COOKIES.emplace_back({cookie.first, cookie.second});
                     // Manually set cookie, because cpr's cookie algorithm does not conform to the rfc6265
                     HTTP::HEADERS["cookie"] = HTTP::getEncodedCookie(HTTP::COOKIES);
+
+                    // 只打 Cookie 名，不打值（登录凭据不能进日志）
+                    std::string cookieNames;
+                    for (const auto& cookie : cookies) {
+                        if (!cookieNames.empty()) cookieNames += ",";
+                        cookieNames += cookie.first;
+                    }
+                    brls::Logger::info("[login] QR success: jar={} raw={} total={} names=[{}]", jarCount, rawCount,
+                                       cookies.size(), cookieNames);
+
                     if (BilibiliClient::writeCookiesCallback) {
                         BilibiliClient::writeCookiesCallback(cookies, data.refresh_token);
                     }

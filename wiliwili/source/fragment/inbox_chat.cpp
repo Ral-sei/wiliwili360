@@ -182,24 +182,25 @@ void InboxChat::onError(const std::string& error) {
     this->recyclingGrid->setError(error);
 }
 
+// 本方法只会在 InboxMsgRequest 的 ASYNC_RELEASE 守卫之后、主线程任务里被调用，
+// 此刻对象必然存活；不要再 brls::sync 二次入队一个只捕获裸 this 的任务，
+// 否则任务在下一帧执行前 InboxChat 已被返回键销毁（use-after-free）。
 void InboxChat::onMsgList(const bilibili::InboxMessageResultWrapper& result, bool refresh) {
-    brls::Threading::sync([this, result, refresh]() {
-        auto* datasource = dynamic_cast<DataSourceMsgList*>(recyclingGrid->getDataSource());
-        if (datasource && !refresh) {
-            if (!result.messages.empty()) {
-                if(!datasource->appendData(result)){
-                    // 只在有内容更新时才调整位置
-                    recyclingGrid->notifyDataChanged();
-                    recyclingGrid->selectRowAt(datasource->getItemCount() - 1, true);
-                }
+    auto* datasource = dynamic_cast<DataSourceMsgList*>(recyclingGrid->getDataSource());
+    if (datasource && !refresh) {
+        if (!result.messages.empty()) {
+            if(!datasource->appendData(result)){
+                // 只在有内容更新时才调整位置
+                recyclingGrid->notifyDataChanged();
+                recyclingGrid->selectRowAt(datasource->getItemCount() - 1, true);
             }
-        } else {
-            datasource = new DataSourceMsgList(result, this->talkerId);
-            recyclingGrid->setDefaultCellFocus(datasource->getItemCount() - 1);
-            recyclingGrid->setDataSource(datasource);
-            recyclingGrid->selectRowAt(recyclingGrid->getDefaultCellFocus(), true);
         }
-    });
+    } else {
+        datasource = new DataSourceMsgList(result, this->talkerId);
+        recyclingGrid->setDefaultCellFocus(datasource->getItemCount() - 1);
+        recyclingGrid->setDataSource(datasource);
+        recyclingGrid->selectRowAt(recyclingGrid->getDefaultCellFocus(), true);
+    }
 }
 
 void InboxChat::onSendMsg(const bilibili::InboxSendResult& result) {

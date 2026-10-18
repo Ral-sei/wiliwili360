@@ -71,6 +71,10 @@ public:
      */
     void requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo = true);
 
+    // Refresh an expiring media URL without reloading the already loaded danmaku.
+    void requestVideoUrlWithoutDanmaku(const std::string& bvid, uint64_t cid);
+    void requestSeasonVideoUrlWithoutDanmaku(const std::string& bvid, uint64_t cid);
+
     /// 获取投屏地址
     void requestCastVideoUrl(uint64_t oid, uint64_t cid, int type);
 

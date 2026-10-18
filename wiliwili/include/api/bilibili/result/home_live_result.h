@@ -127,7 +127,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LivePayLink, start_time, end_time, goods_link
 
 class LiveAreaResult {
 public:
-    LiveAreaResult() = default;
+    LiveAreaResult() : id(0), area_v2_id(0), area_v2_parent_id(0) {}
     LiveAreaResult(int id, std::string title, int area_v2_id, int area_v2_parent_id)
         : id(id), title(title), area_v2_id(area_v2_id), area_v2_parent_id(area_v2_parent_id) {}
     int id;
@@ -135,7 +135,20 @@ public:
     int area_v2_id;
     int area_v2_parent_id;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LiveAreaResult, id, title, area_v2_id, area_v2_parent_id);
+// The live feed is not schema-stable. Older responses may omit fields or
+// return null for an area. Avoid the exception-based macro on Xbox, where a
+// malformed item must not terminate the network worker.
+inline void from_json(const nlohmann::json& j, LiveAreaResult& out) {
+    if (!j.is_object()) return;
+    if (j.contains("id") && (j.at("id").is_number_integer() || j.at("id").is_number_unsigned()))
+        out.id = j.at("id").get<int>();
+    if (j.contains("title") && j.at("title").is_string())
+        out.title = j.at("title").get<std::string>();
+    if (j.contains("area_v2_id") && (j.at("area_v2_id").is_number_integer() || j.at("area_v2_id").is_number_unsigned()))
+        out.area_v2_id = j.at("area_v2_id").get<int>();
+    if (j.contains("area_v2_parent_id") && (j.at("area_v2_parent_id").is_number_integer() || j.at("area_v2_parent_id").is_number_unsigned()))
+        out.area_v2_parent_id = j.at("area_v2_parent_id").get<int>();
+}
 
 /**
  * 直播间相关信息

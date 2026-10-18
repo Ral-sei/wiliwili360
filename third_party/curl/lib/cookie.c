@@ -99,6 +99,29 @@ Example set of cookies:
 /* The last #include file should be: */
 #include "memdebug.h"
 
+/*
+ * Current time in unix seconds.
+ *
+ * On Xbox 360 the XDK CRT's time() hands back a packed 64-bit value of the
+ * shape `(epoch << 32) | fraction` (measured 7692297454196417448, whose high
+ * half 1791002567 is the real epoch = 2026-10-03).  Comparing cookie expiry
+ * against that value marks every cookie carrying an Expires attribute as
+ * already expired, so remove_expired() drops the SESSDATA cookies returned by
+ * Bilibili's QR login poll before CURLINFO_COOKIELIST is ever read and the
+ * login ends up with no session.  Unpack it here; a plain epoch (high half
+ * zero) is passed through untouched.
+ */
+static time_t cookie_now(void)
+{
+  time_t now = time(NULL);
+#if defined(_XBOX) || defined(_XBOX360) || defined(PLATFORM_XBOX360)
+  unsigned long long packed = (unsigned long long)now;
+  if(packed > 0xffffffffULL)
+    now = (time_t)(packed >> 32);
+#endif
+  return now;
+}
+
 static void freecookie(struct Cookie *co)
 {
   if(co->expirestr)
@@ -296,7 +319,7 @@ static void strstore(char **str, const char *newstr)
 static void remove_expired(struct CookieInfo *cookies)
 {
   struct Cookie *co, *nx, *pv;
-  curl_off_t now = (curl_off_t)time(NULL);
+  curl_off_t now = (curl_off_t)cookie_now();
 
   co = cookies->cookies;
   pv = NULL;
@@ -348,7 +371,7 @@ Curl_cookie_add(struct SessionHandle *data,
   char name[MAX_NAME];
   struct Cookie *co;
   struct Cookie *lastc=NULL;
-  time_t now = time(NULL);
+  time_t now = cookie_now();
   bool replace_old = FALSE;
   bool badcookie = FALSE; /* cookies are good by default. mmmmm yummy */
 
@@ -965,7 +988,7 @@ struct Cookie *Curl_cookie_getlist(struct CookieInfo *c,
 {
   struct Cookie *newco;
   struct Cookie *co;
-  time_t now = time(NULL);
+  time_t now = cookie_now();
   struct Cookie *mainco=NULL;
   size_t matches = 0;
 

@@ -133,6 +133,10 @@ void SVGImage::updateBitmap() {
     float width  = this->_width * brls::Application::windowScale;
     float height = this->_height * brls::Application::windowScale;
     auto bitmap  = this->document->renderToBitmap(width, height);
+    // LunaSVG rasterises premultiplied ARGB and convertToRGBA() turns it into
+    // straight (unpremultiplied) RGBA bytes; the byte order is handled inside
+    // lunasvg so it matches the rasteriser on both endiannesses. The Xbox
+    // D3D9 backend then applies its own GPUENDIAN_8IN32 swap while uploading.
     bitmap.convertToRGBA();
     NVGcontext* vg = brls::Application::getNVGContext();
     int tex        = nvgCreateImageRGBA(vg, bitmap.width(), bitmap.height(), 0, bitmap.data());

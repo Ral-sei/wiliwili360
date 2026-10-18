@@ -3347,7 +3347,28 @@ CURLcode Curl_http_readwrite_headers(struct SessionHandle *data,
     /* Check for Content-Length: header lines to get size */
     if(!k->ignorecl && !data->set.ignorecl &&
        checkprefix("Content-Length:", k->p)) {
-      curl_off_t contentlength = curlx_strtoofft(k->p+15, NULL, 10);
+      curl_off_t contentlength;
+#if defined(_XBOX) || defined(PLATFORM_XBOX360)
+      /* The Xbox CRT's 64-bit strto* ABI can leave stale high bits in the
+       * returned value. Parse the HTTP decimal field directly instead. */
+      {
+        const unsigned char *cl = (const unsigned char *)k->p + 15;
+        contentlength = 0;
+        while(*cl == ' ' || *cl == '\t')
+          cl++;
+        while(*cl >= '0' && *cl <= '9') {
+          const curl_off_t digit = (curl_off_t)(*cl - '0');
+          if(contentlength > (CURL_OFF_T_MAX - digit) / 10) {
+            contentlength = CURL_OFF_T_MAX;
+            break;
+          }
+          contentlength = contentlength * 10 + digit;
+          cl++;
+        }
+      }
+#else
+      contentlength = curlx_strtoofft(k->p+15, NULL, 10);
+#endif
       if(data->set.max_filesize &&
          contentlength > data->set.max_filesize) {
         failf(data, "Maximum file size exceeded");

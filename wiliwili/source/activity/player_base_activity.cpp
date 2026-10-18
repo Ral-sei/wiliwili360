@@ -315,9 +315,9 @@ void BasePlayerActivity::setCommonData() {
                     // 有效期已过，重新请求视频链接
                     auto self = dynamic_cast<PlayerSeasonActivity*>(this);
                     if (self) {
-                        this->requestSeasonVideoUrl(episodeResult.bvid, episodeResult.cid, false);
+                        this->requestSeasonVideoUrlWithoutDanmaku(episodeResult.bvid, episodeResult.cid);
                     } else {
-                        this->requestVideoUrl(videoDetailResult.bvid, videoDetailPage.cid, false);
+                        this->requestVideoUrlWithoutDanmaku(videoDetailResult.bvid, videoDetailPage.cid);
                     }
 
                     //todo: 如果有选择的字幕加载对应的字幕
@@ -467,7 +467,9 @@ void BasePlayerActivity::setVideoQuality() {
         "wiliwili/player/quality"_i18n,
         [this](int selected) {
             int code                           = this->videoUrlResult.accept_quality[selected];
-#ifdef __PSV__
+#if defined(__PSV__) || defined(PLATFORM_XBOX360)
+            // 软解上限 720P, 与配置默认值 WILI_VIDEO_QUALITY_*_MAX 一致,
+            // 防止存储过的高清晰度设置绕过平台限制
             if (code > 64) {
                 code = 64;
             }

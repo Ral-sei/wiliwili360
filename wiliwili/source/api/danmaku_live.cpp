@@ -14,6 +14,13 @@
 #include <ctime>
 #include <string>
 
+#if defined(PLATFORM_XBOX360)
+#include <xtl.h>
+// 亲和性/优先级复核探针（round-8，§15.5）；xboxkrnl 导出，OXDK/XDK 头无声明。
+// 声明必须在文件作用域：lambda 体内不允许出现 linkage-specification。
+extern "C" void DbgPrint(const char*, ...);
+#endif
+
 namespace bilibili {
 void BilibiliClient::get_live_danmaku_info(int roomid, const std::function<void(LiveDanmakuinfo)> &callback,
                                            const ErrorCallback &error) {
@@ -130,6 +137,17 @@ void LiveDanmaku::connect(int room_id, uint64_t uid, const bilibili::LiveDanmaku
 
     // 启动Mongoose事件循环线程
     mongoose_thread = std::thread([this]() {
+#if defined(PLATFORM_XBOX360)
+        // 静态线程分区（对齐 Xbox 360 YouTube 客户端的"每线程钉硬件线程"与
+        // XDK "后台 CPU 密集线程降级"指引）：网络轮询属于后台工作，钉到 hw5
+        // （libmpv worker spread 表 {2,4,1,3} 不使用 hw5）并降到主线程之下，
+        // 避免弹幕洪峰在 hw0 与出帧/上传逐帧抢时间片。
+        XSetThreadProcessor(GetCurrentThread(), 5);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#if X360_RUNTIME_PROBES
+        DbgPrint("[x360-thread] danmaku/mongoose hw=5 prio=below");
+#endif
+#endif
         while (this->is_connected()) {
             if (mgr) {
                 mg_mgr_poll(mgr, wait_time);
@@ -149,6 +167,14 @@ void LiveDanmaku::connect(int room_id, uint64_t uid, const bilibili::LiveDanmaku
 
     // 启动消息处理线程
     task_thread = std::thread([this]() {
+#if defined(PLATFORM_XBOX360)
+        // 同上：消息解析属于后台工作，与 mongoose 一起留在 hw5。
+        XSetThreadProcessor(GetCurrentThread(), 5);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#if X360_RUNTIME_PROBES
+        DbgPrint("[x360-thread] danmaku/task hw=5 prio=below");
+#endif
+#endif
         std::string msg;
         while (connected.load(std::memory_order_acquire)) {
             if (msg_queue.pop(msg, true, connected) && onMessage) {

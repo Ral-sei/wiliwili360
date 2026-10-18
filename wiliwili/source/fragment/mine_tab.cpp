@@ -44,12 +44,14 @@ MineTab::MineTab() {
         if (status == bilibili::LoginInfo::SUCCESS) {
             brls::Logger::debug("{}", "wiliwili/mine/login/success"_i18n);
             this->requestData();
-            runBestEffort([this]() { this->mineHistory->requestData(true); });
-            runBestEffort([this]() { this->mineCollection->requestData(true); });
-            runBestEffort([this]() { this->mineSubscription->requestData(true); });
-            runBestEffort([this]() { this->mineAnime->requestData(true); });
-            runBestEffort([this]() { this->mineSeries->requestData(true); });
-            runBestEffort([this]() { this->mineLater->requestData(); });
+            runBestEffort([this]() {
+                if (auto* view = this->mineHistory.getViewIfPresent()) view->requestData(true);
+                if (auto* view = this->mineCollection.getViewIfPresent()) view->requestData(true);
+                if (auto* view = this->mineSubscription.getViewIfPresent()) view->requestData(true);
+                if (auto* view = this->mineAnime.getViewIfPresent()) view->requestData(true);
+                if (auto* view = this->mineSeries.getViewIfPresent()) view->requestData(true);
+                if (auto* view = this->mineLater.getViewIfPresent()) view->requestData();
+            });
             runBestEffort([this]() {
                 //动态页刷新
                 auto mainTab = dynamic_cast<AutoTabFrame*>(this->getParent());

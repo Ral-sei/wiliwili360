@@ -14,6 +14,7 @@
         "low_quality": "Decodifica di bassa qualità (Minor utilizzo CPU)",
         "in_memory_cache": "Cache in memoria",
         "hwdec": "Decodifica Hardware",
+        "hwdec_experimental": "Funzione sperimentale: richiede il codec pack \"Optional Media Update\" di sistema; la riproduzione potrebbe non riuscire",
         "auto_fullscreen": "Schermo intero automatico all'apertura del player",
         "auto_play": "Riproduzione automatica nella pagina dei dettagli del video",
         "exit_fullscreen": "Esci dallo schermo intero alla fine della riproduzione",
@@ -484,6 +485,7 @@
   },
   "dialog": {
     "not_supported": "Non supportato",
+    "ime_unavailable": "L'input di testo non è disponibile in questa build",
     "quit_hint": "Uscita dall'applicazione..."
   }
 }

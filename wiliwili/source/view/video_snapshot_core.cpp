@@ -82,7 +82,18 @@ void VideoSnapshotCore::loadTexture(size_t index) {
     // Use cpr async callback to avoid std::thread + detach
     auto session = bilibili::HTTP::createSession();
     session->SetUrl(cpr::Url{url});
-    session->GetCallback([this, gen, index, url](const cpr::Response& r) {
+#if defined(PLATFORM_XBOX360)
+    const std::uint64_t t_submit = brls::xbox360perf::nowUsec();
+#endif
+    session->GetCallback([this, gen, index, url
+#if defined(PLATFORM_XBOX360)
+                          , session, t_submit
+#endif
+    ](const cpr::Response& r) {
+#if defined(PLATFORM_XBOX360)
+        // P0 §5.5-5：快照缩略图直连请求（此前完全没有 [x360-net] 覆盖）。
+        BILI_X360_NETLOG("GET", url, session, r, t_submit);
+#endif
         if (r.status_code != 200 || r.text.empty()) {
             brls::Logger::error("[Snapshot] HTTP failed: index={} url={} status={} size={}", index, url, r.status_code, r.text.size());
             brls::sync([this, gen, index]() {
@@ -103,9 +114,18 @@ void VideoSnapshotCore::loadTexture(size_t index) {
             return;
         }
         brls::sync([this, gen, imageData, imageW, imageH, index, url]() {
+#if defined(PLATFORM_XBOX360)
+            // P0 §5.5-3 测量：纹理创建在主线程执行，>100ms 即为掉帧来源之一。
+            const std::uint64_t t_tex = brls::xbox360perf::nowUsec();
+#endif
             NVGcontext* vg = brls::Application::getNVGContext();
             int tex        = nvgCreateImageRGBA(vg, imageW, imageH, 0, imageData);
             stbi_image_free(imageData);
+#if defined(PLATFORM_XBOX360)
+            const double texMs = brls::xbox360perf::msSince(t_tex);
+            if (texMs >= 100.0)
+                brls::Logger::info("[Snapshot] syncTex {}x{} took {:.0f} ms", imageW, imageH, texMs);
+#endif
             if (gen != snapshotGeneration) {
                 brls::Logger::error("[Snapshot] gen mismatch: index={} url={} gen={} curGen={}, deleting tex={}", index, url, gen, snapshotGeneration, tex);
                 if (tex > 0) nvgDeleteImage(vg, tex);

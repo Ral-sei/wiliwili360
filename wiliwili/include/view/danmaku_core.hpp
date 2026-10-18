@@ -170,7 +170,10 @@ public:
      * 加载弹幕数据
      * @param data 弹幕列表
      */
-    void loadDanmakuData(const std::vector<DanmakuItem> &data);
+    // The list is prepared on the request worker and transferred to the UI
+    // without copying.  Keeping the sort out of the main-thread sync queue is
+    // important on Xbox 360, where vector allocation can stall the renderer.
+    void loadDanmakuData(std::vector<DanmakuItem> &&data);
 
     /**
      * 实时添加一条弹幕

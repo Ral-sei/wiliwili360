@@ -6,9 +6,11 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <zlib.h>
 #include <cpr/cpr.h>
 #include <mongoose.h>
+#include <borealis/core/logger.hpp>
 
 #include "utils/string_helper.hpp"
 
@@ -77,6 +79,77 @@ std::string decompressGzipData(const std::string &compressedData) {
         return {};
 
     return decompressedData;
+}
+
+namespace {
+
+// 严格模式解压：windowBits < 0 为裸 deflate（RFC1951），> 0 为 zlib 包装，
+// 16 + MAX_WBITS 为 gzip。流不完整或数据非法时返回空串。
+std::string inflateOnce(const std::string &in, int windowBits) {
+    if (in.empty()) return {};
+
+    z_stream zs;
+    memset(&zs, 0, sizeof(zs));
+    if (inflateInit2(&zs, windowBits) != Z_OK) return {};
+
+    zs.next_in  = reinterpret_cast<Bytef *>(const_cast<char *>(in.data()));
+    zs.avail_in = static_cast<uInt>(in.size());
+
+    std::string out;
+    char buffer[4096];
+    int ret = Z_OK;
+    while (true) {
+        zs.next_out  = reinterpret_cast<Bytef *>(buffer);
+        zs.avail_out = sizeof(buffer);
+
+        ret = inflate(&zs, Z_NO_FLUSH);
+        out.append(buffer, sizeof(buffer) - zs.avail_out);
+
+        if (ret == Z_STREAM_END) break;
+        if (ret != Z_OK) { out.clear(); break; }       // Z_DATA_ERROR / Z_BUF_ERROR 等
+        if (zs.avail_out != 0) { out.clear(); break; } // 输入耗尽仍未结束 → 流被截断
+    }
+
+    inflateEnd(&zs);
+    return out;
+}
+
+} // namespace
+
+std::string inflateContent(const std::string &data, const std::string &contentEncoding) {
+    if (data.empty() || contentEncoding.empty()) return data;
+
+    // 明文判定：跳过空白与 UTF-8 BOM 后仍是 XML/JSON 开头则无需解压。
+    // 也保证了即使 curl 将来编入 zlib 先解压过一次，也不会被二次解压。
+    size_t i = 0;
+    if (data.size() >= 3 && static_cast<unsigned char>(data[0]) == 0xEF &&
+        static_cast<unsigned char>(data[1]) == 0xBB && static_cast<unsigned char>(data[2]) == 0xBF)
+        i = 3;
+    while (i < data.size() && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+    if (i < data.size() && (data[i] == '<' || data[i] == '{' || data[i] == '[')) return data;
+
+    std::string encoding = contentEncoding;
+    for (auto &c : encoding) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+
+    std::string out;
+    if (encoding.find("gzip") != std::string::npos) {
+        out = inflateOnce(data, 16 + MAX_WBITS);
+    } else if (encoding.find("deflate") != std::string::npos) {
+        // bilibili 的 /x/v1/dm/list.so 等接口返回裸 deflate，个别 CDN 会加 zlib 头
+        out = inflateOnce(data, -MAX_WBITS);
+        if (out.empty()) out = inflateOnce(data, MAX_WBITS);
+    } else {
+        return data; // identity / br 等不处理
+    }
+
+    if (out.empty()) {
+        brls::Logger::error("Content-Encoding: {} but inflate failed ({} bytes), use raw body",
+                            contentEncoding, data.size());
+        return data;
+    }
+    brls::Logger::debug("Decompressed Content-Encoding: {} ({} -> {} bytes)", contentEncoding, data.size(),
+                        out.size());
+    return out;
 }
 
 std::string toUpper( const std::string & str, std::string::size_type length )

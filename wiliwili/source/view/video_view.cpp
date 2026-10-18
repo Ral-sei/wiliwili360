@@ -817,6 +817,10 @@ std::string VideoView::genExtraUrlParam(int start, int end, const std::vector<st
     std::string extra =
 #ifdef __PSV__
         "referrer=\"https://www.bilibili.com\",network-timeout=10";
+#elif defined(PLATFORM_XBOX360)
+        // Xbox 360: 流打开时往往同时在拉评论/封面等请求，5s 太激进，
+        // 坏节点直接把整个播放列表耗尽；放宽到 15s 给慢握手留余量
+        "referrer=\"https://www.bilibili.com\",network-timeout=15";
 #else
         "referrer=\"https://www.bilibili.com\",network-timeout=5";
 #endif
@@ -1304,7 +1308,6 @@ void VideoView::setFullScreen(bool fs) {
             ASYNC_RELEASE
             //todo: a better way to get videoView pointer
             auto activityStack = brls::Application::getActivitiesStack();
-
             // 当最前方的 activity 内不包含 videoView 时，不执行关闭全屏
             brls::Activity* top = activityStack[activityStack.size() - 1];
             if (!dynamic_cast<BasePlayerActivity*>(top)) {
@@ -1420,7 +1423,7 @@ void VideoView::setFullScreen(bool fs) {
                 ProgramConfig::instance().setWindowFullscreen(false);
             }
 #endif
-        });
+        }, "fs");   // tag：退出全屏同步任务（17:55 卡顿与 "set fullscreen state" 邻近）
     }
 }
 
