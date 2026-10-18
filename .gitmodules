@@ -12,7 +12,7 @@
 	url = https://github.com/xfangfang/OpenCC.git
 [submodule "library/lunasvg"]
 	path = library/lunasvg
-	url = https://github.com/sammycage/lunasvg.git
+	url = https://github.com/Ral-sei/lunasvg.git
 [submodule "library/cpr"]
 	path = library/cpr
 	url = https://github.com/Ral-sei/cpr.git
