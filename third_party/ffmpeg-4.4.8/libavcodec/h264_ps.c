@@ -27,6 +27,10 @@
 
 #include <inttypes.h>
 
+#if defined(_XBOX)
+#include <stdatomic.h>
+#endif
+
 #include "libavutil/imgutils.h"
 #include "internal.h"
 #include "mathops.h"
@@ -635,6 +639,22 @@ int ff_h264_decode_seq_parameter_set(GetBitContext *gb, AVCodecContext *avctx,
         ps->sps_list[sps_id] = sps_buf;
     }
 
+#if defined(_XBOX) && defined(X360_RUNTIME_PROBES) && X360_RUNTIME_PROBES
+    /* [x360-sps] 流参数探针：判断"B 站流 vs 本地文件"的对比是否同编码。
+     * 只打前 6 个 SPS，DbgPrint 直出（不进 av_log）。
+     * 仅诊断构建启用；SPS 解析可在多个帧线程上并发，计数用原子量。 */
+    {
+        extern void DbgPrint(const char *fmt, ...);
+        static atomic_int x360_sps_logged;
+        const int index =
+            atomic_fetch_add_explicit(&x360_sps_logged, 1, memory_order_relaxed);
+        if (index < 6) {
+            DbgPrint("[x360-sps] profile=%d level=%d refs=%d size=%dx%d\n",
+                     sps->profile_idc, sps->level_idc, sps->ref_frame_count,
+                     sps->mb_width * 16, sps->mb_height * 16);
+        }
+    }
+#endif
     return 0;
 
 fail:

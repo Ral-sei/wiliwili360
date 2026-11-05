@@ -27,6 +27,11 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/imgutils.h"
+#if defined(_XBOX)
+#include "libavutil/time.h"
+#include <stdatomic.h>
+extern void DbgPrint(const char *fmt, ...);
+#endif
 #include "internal.h"
 #include "cabac.h"
 #include "cabac_functions.h"
@@ -161,6 +166,31 @@ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup)
     AVCodecContext *const avctx = h->avctx;
     int err = 0;
     h->mb_y = 0;
+
+#if defined(_XBOX) && defined(X360_RUNTIME_PROBES) && X360_RUNTIME_PROBES
+    /* [x360-dec] 解码器内部帧率：每 30 帧打一次墙钟 fps，用来区分
+     * "解码慢" 与 "mpv 消费/呈现慢"。与 mpv 的 est-vf 无关。
+     * 仅诊断构建启用（-DX360_RUNTIME_PROBES=1）；ff_h264_field_end 在帧线程
+     * 上并发执行，计数器用原子量避免数据竞争。 */
+    {
+        static atomic_int x360_dec_n;
+        static atomic_int x360_dec_t0_ms;
+        const int now_ms = (int)(av_gettime_relative() / 1000);
+        int t0 = atomic_load_explicit(&x360_dec_t0_ms, memory_order_relaxed);
+        if (t0 == 0) {
+            atomic_compare_exchange_strong(&x360_dec_t0_ms, &t0, now_ms);
+        } else if (atomic_fetch_add_explicit(&x360_dec_n, 1, memory_order_relaxed) + 1 >= 30) {
+            const int dt = now_ms - t0;
+            if (dt > 0) {
+                const int fps10 = (int)((int64_t)30 * 10000 / dt);
+                DbgPrint("[x360-dec] 30 frames in %d ms = %d.%d fps\n",
+                         dt, fps10 / 10, fps10 % 10);
+            }
+            atomic_store_explicit(&x360_dec_n, 0, memory_order_relaxed);
+            atomic_store_explicit(&x360_dec_t0_ms, now_ms, memory_order_relaxed);
+        }
+    }
+#endif
 
     if (in_setup || !(avctx->active_thread_type & FF_THREAD_FRAME)) {
         if (!h->droppable) {
