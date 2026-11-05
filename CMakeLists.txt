@@ -238,6 +238,11 @@ elseif (PLATFORM_XBOX360)
         ${XBOX360_CURL_INCLUDE}
         ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/include)
     target_compile_definitions(xbox360_platform_shims PRIVATE NONET)
+    # The CRT shims need to know whether xav.lib is in the link: only then do
+    # they have to supply IsEqualGUID (see xbox360_crt_shims.c).
+    if (XBOX360_XAV)
+        target_compile_definitions(xbox360_platform_shims PRIVATE X360_XAV=1)
+    endif ()
     set_source_files_properties(
         ${CBFFMPEG_DIR}/compat/xbox360/xbox_winsock_extra.c
         PROPERTIES COMPILE_OPTIONS "-I${CBFFMPEG_DIR}/compat/xbox360/include")

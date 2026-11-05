@@ -157,3 +157,127 @@ void _Unwind_Resume(void* exception)
     (void)exception;
     abort();
 }
+
+// --- POSIX spellings the XDK's oldnames.lib used to alias -------------------
+//
+// xav.lib is a static XMF media pipeline and calls the plain POSIX names
+// (open/close/read/write/lseek/isatty/fdopen/dup2/unlink/tempnam/vsnprintf/
+// vsnprintf_s/_setjmp/j1).  In a normal MSVC link those come from oldnames.lib,
+// which is nothing but 139-byte "machine 0x0000" objects holding
+// /alternatename directives -- coff2elf refuses them, so OXDK links without any
+// of the aliases.  Each shim below is the same forwarding the alias table would
+// have produced; libcMT does define every "_"-prefixed target.
+//
+// Only reachable when XBOX360_XAV is on: nothing else in wiliwili calls them.
+
+extern int _open(const char* path, int flags, ...);
+extern int _close(int fd);
+extern int _read(int fd, void* buffer, unsigned int count);
+extern int _write(int fd, const void* buffer, unsigned int count);
+extern long _lseek(int fd, long offset, int origin);
+extern int _isatty(int fd);
+extern void* _fdopen(int fd, const char* mode);
+extern int _dup2(int fd1, int fd2);
+extern int _unlink(const char* path);
+extern char* _tempnam(const char* dir, const char* prefix);
+extern int _vsnprintf(char* buffer, unsigned int count, const char* format,
+                      __builtin_va_list args);
+extern int _vsnprintf_s(char* buffer, unsigned int sizeOfBuffer, unsigned int count,
+                        const char* format, __builtin_va_list args);
+extern double _j1(double x);
+extern int setjmp(void* env);
+
+int open(const char* path, int flags, ...)
+{
+    // _O_CREAT is the only flag that makes the mode argument meaningful.
+    if (flags & 0x0100) {
+        __builtin_va_list args;
+        __builtin_va_start(args, flags);
+        int mode = __builtin_va_arg(args, int);
+        __builtin_va_end(args);
+        return _open(path, flags, mode);
+    }
+    return _open(path, flags);
+}
+
+int close(int fd) { return _close(fd); }
+
+int read(int fd, void* buffer, unsigned int count) { return _read(fd, buffer, count); }
+
+int write(int fd, const void* buffer, unsigned int count) { return _write(fd, buffer, count); }
+
+long lseek(int fd, long offset, int origin) { return _lseek(fd, offset, origin); }
+
+int isatty(int fd) { return _isatty(fd); }
+
+void* fdopen(int fd, const char* mode) { return _fdopen(fd, mode); }
+
+int dup2(int fd1, int fd2) { return _dup2(fd1, fd2); }
+
+int unlink(const char* path) { return _unlink(path); }
+
+char* tempnam(const char* dir, const char* prefix) { return _tempnam(dir, prefix); }
+
+// The build passes -Dvsnprintf=_vsnprintf, which would turn the definition
+// below into a second _vsnprintf and collide with libcMT's.  xav.lib was built
+// by MSVC and calls the plain spelling, so the real symbol is needed here.
+#ifdef vsnprintf
+#undef vsnprintf
+#endif
+
+int vsnprintf(char* buffer, unsigned int count, const char* format, __builtin_va_list args)
+{
+    return _vsnprintf(buffer, count, format, args);
+}
+
+int vsnprintf_s(char* buffer, unsigned int sizeOfBuffer, unsigned int count,
+                const char* format, __builtin_va_list args)
+{
+    return _vsnprintf_s(buffer, sizeOfBuffer, count, format, args);
+}
+
+// _setjmp must share setjmp's caller frame.  A C wrapper would call setjmp()
+// from its own frame, so longjmp() would later restore a stack pointer that is
+// dead (and clang, not knowing the wrapper returns twice, may reuse the slot).
+// Tail-branch instead: `b` leaves LR pointing back into xav.lib's call site and
+// runs setjmp with the caller's SP, so it saves exactly the frame it would have
+// saved had xav.lib called setjmp directly.
+__asm__(
+    ".text\n"
+    ".globl _setjmp\n"
+    ".type _setjmp, @function\n"
+    "_setjmp:\n"
+    "    b setjmp\n"
+    ".size _setjmp, . - _setjmp\n");
+
+// j1 has a "_"-prefixed twin under a different name in libcMT (_j1); an
+// ordinary call is correct here, no caller-frame identity is involved.
+double j1(double x) { return _j1(x); }
+
+// --- winsock wrappers' __real_ targets -------------------------------------
+//
+// xav.lib references gethostbyname, which pulls xbox_winsock_extra.o in; that
+// object defines __wrap_getsockopt/__wrap_WSAStartup and calls __real_*, which
+// only ld.lld's --wrap can define.  wiliwili does not wrap (its networking is
+// already working), so point __real_* straight at the XNet entry points.  If
+// --wrap is ever enabled for this link these two become self-recursive.
+extern int WSAStartup(unsigned short version, void* data);
+extern int getsockopt(unsigned int socket, int level, int name, char* value, int* length);
+
+int __real_WSAStartup(unsigned short version, void* data)
+{
+    return WSAStartup(version, data);
+}
+
+int __real_getsockopt(unsigned int socket, int level, int name, char* value, int* length)
+{
+    return getsockopt(socket, level, name, value, length);
+}
+
+// --- IsEqualGUID -----------------------------------------------------------
+//
+// XAV (xbox360_xav) hardware-decode path is retired: its entry points in
+// xav.lib are MSVC-mangled C++ symbols the OXDK toolchain cannot translate,
+// so the link always fails and nothing calls it.  The shim that satisfied
+// xav.lib's IsEqualGUID reference is gone with it; d3dx9.lib / xaudio2.lib
+// export a real IsEqualGUID for any remaining consumer.

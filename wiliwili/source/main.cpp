@@ -90,7 +90,49 @@ int main(int argc, char* argv[]) {
     brls::Application::getPlatform()->disableScreenDimming(false);
 
     if (brls::Application::getPlatform()->isApplicationMode()) {
-        Intent::openMain();
+        // Validation build: when the local XAV test stream sits next to the
+        // executable, jump straight into a known-good video so the private XAV
+        // media-source path runs without touching the UI.  Delete the file (or
+        // this block) for a normal build.
+        bool xavSelfTest = false;
+#if defined(PLATFORM_XBOX360) && X360_XAV
+        // xav_test.h264 drives the private-source path with a local stream;
+        // xav_autoopen only jumps straight to the test video so the public
+        // Open(url) path can be exercised without the local file present.
+        if (FILE* probe = fopen("game:\\xav_test.h264", "rb")) {
+            fclose(probe);
+            xavSelfTest = true;
+        } else if (FILE* probe = fopen("game:\\xav_autoopen", "rb")) {
+            fclose(probe);
+            xavSelfTest = true;
+        }
+#endif
+        // game:\x360_autotest : first line is a BV id -> boot straight into the
+        // player with it.  Lets the console run a fixed clip for measurements
+        // without anyone navigating the UI, and without touching the default
+        // path when the file is absent.  Console-only test hook: it must not
+        // run on other platforms, where a stray file could redirect startup.
+        char autoTestBV[32] = {0};
+#if defined(PLATFORM_XBOX360)
+        if (FILE* f = fopen("game:\\x360_autotest", "rb")) {
+            if (fgets(autoTestBV, sizeof(autoTestBV), f)) {
+                for (size_t i = strlen(autoTestBV); i > 0; i--) {
+                    const char c = autoTestBV[i - 1];
+                    if (c == '\n' || c == '\r' || c == ' ')
+                        autoTestBV[i - 1] = 0;
+                    else
+                        break;
+                }
+            }
+            fclose(f);
+        }
+#endif
+        if (autoTestBV[0])
+            Intent::openBV(autoTestBV);
+        else if (xavSelfTest)
+            Intent::openBV("BV1Da411Y7U4");
+        else
+            Intent::openMain();
         // Uncomment these lines to debug activities
         //        Intent::openBV("BV1Da411Y7U4");  // 弹幕防遮挡 (横屏)
         //        Intent::openBV("BV1iN4y1m7J3");  // 弹幕防遮挡 (竖屏)
