@@ -88,6 +88,59 @@ static inline void get_lowest_part_y(const H264Context *h, H264SliceContext *sl,
     }
 }
 
+#if defined(_XBOX)
+#include <stdatomic.h>
+
+/* Xbox 360 REFCACHE: ff_thread_await_progress takes a mutex + condvar per
+ * call.  With frame threading a slice checks the same reference dozens of
+ * times; caching the last-known progress lets repeat checks skip the lock.
+ * Mirrors the reference player's per-slice acquired-progress cache. */
+static void x360_ref_cache_clear(H264SliceContext *sl)
+{
+    memset(sl->x360_ref_cache, 0, sizeof(sl->x360_ref_cache));
+    sl->x360_ref_cache_active = 1;
+}
+
+void x360_h264_clear_ref_cache(H264SliceContext *sl)
+{
+    x360_ref_cache_clear(sl);
+}
+
+static int x360_ref_cache_check(H264SliceContext *sl, int list, int ref,
+                                const H264Picture *pic, int field, int need)
+{
+    if (!sl->x360_ref_cache_active) return 0;
+    __typeof__(sl->x360_ref_cache[0][0]) *e = &sl->x360_ref_cache[list][ref];
+    /* Same predicate as ff_thread_await_progress' fast path, per field:
+     * progress[field] is the value this thread already acquired for that
+     * field, so need <= progress[field] means the wait is already done. */
+    if (e->valid && e->ref == pic && e->progress[field] >= need)
+        return 1;
+    return 0;
+}
+
+static void x360_ref_cache_store(H264SliceContext *sl, int list, int ref,
+                                 const H264Picture *pic, int field)
+{
+    if (!sl->x360_ref_cache_active) return;
+    __typeof__(sl->x360_ref_cache[0][0]) *e = &sl->x360_ref_cache[list][ref];
+    if (!e->valid || e->ref != pic) {
+        /* New picture in this slot: both field slots are stale (they could
+         * still satisfy a check through e->ref == pic alone), so reset them
+         * to -1 == "nothing acquired yet", matching a fresh progress buffer
+         * (pthread_frame.c inits progress[] to -1). */
+        e->ref = pic;
+        e->valid = 1;
+        e->progress[0] = e->progress[1] = -1;
+    }
+    if (pic && pic->tf.progress && pic->tf.progress->data) {
+        e->progress[field] = atomic_load_explicit(
+            &((atomic_int *)pic->tf.progress->data)[field],
+            memory_order_acquire);
+    }
+}
+#endif
+
 /**
  * Wait until all reference frames are available for MC operations.
  *
@@ -95,6 +148,10 @@ static inline void get_lowest_part_y(const H264Context *h, H264SliceContext *sl,
  */
 static void await_references(const H264Context *h, H264SliceContext *sl)
 {
+#if defined(_XBOX)
+    const int x360_prof = xbox360_h264_prof_enabled;
+    const unsigned x360_t0 = x360_prof ? x360_tb() : 0;
+#endif
     const int mb_xy   = sl->mb_xy;
     const int mb_type = h->cur_pic.mb_type[mb_xy];
     int16_t refs[2][48];
@@ -177,29 +234,52 @@ static void await_references(const H264Context *h, H264SliceContext *sl)
 
                 if (!FIELD_PICTURE(h) && ref_field_picture) { // frame referencing two fields
                     av_assert2((ref_pic->parent->reference & 3) == 3);
-                    ff_thread_await_progress(&ref_pic->parent->tf,
-                                             FFMIN((row >> 1) - !(row & 1),
-                                                   pic_height - 1),
-                                             1);
-                    ff_thread_await_progress(&ref_pic->parent->tf,
-                                             FFMIN((row >> 1), pic_height - 1),
-                                             0);
+                    int need1 = FFMIN((row >> 1) - !(row & 1), pic_height - 1);
+                    int need2 = FFMIN((row >> 1), pic_height - 1);
+#if defined(_XBOX)
+                    if (x360_ref_cache_check(sl, list, ref, ref_pic->parent, 1, need1) &&
+                        x360_ref_cache_check(sl, list, ref, ref_pic->parent, 0, need2))
+                        continue;
+#endif
+                    ff_thread_await_progress(&ref_pic->parent->tf, need1, 1);
+                    ff_thread_await_progress(&ref_pic->parent->tf, need2, 0);
                 } else if (FIELD_PICTURE(h) && !ref_field_picture) { // field referencing one field of a frame
-                    ff_thread_await_progress(&ref_pic->parent->tf,
-                                             FFMIN(row * 2 + ref_field,
-                                                   pic_height - 1),
-                                             0);
+                    int need = FFMIN(row * 2 + ref_field, pic_height - 1);
+#if defined(_XBOX)
+                    if (x360_ref_cache_check(sl, list, ref, ref_pic->parent, 0, need))
+                        continue;
+#endif
+                    ff_thread_await_progress(&ref_pic->parent->tf, need, 0);
                 } else if (FIELD_PICTURE(h)) {
-                    ff_thread_await_progress(&ref_pic->parent->tf,
-                                             FFMIN(row, pic_height - 1),
-                                             ref_field);
+                    int need = FFMIN(row, pic_height - 1);
+#if defined(_XBOX)
+                    if (x360_ref_cache_check(sl, list, ref, ref_pic->parent, ref_field, need))
+                        continue;
+#endif
+                    ff_thread_await_progress(&ref_pic->parent->tf, need, ref_field);
                 } else {
-                    ff_thread_await_progress(&ref_pic->parent->tf,
-                                             FFMIN(row, pic_height - 1),
-                                             0);
+                    int need = FFMIN(row, pic_height - 1);
+#if defined(_XBOX)
+                    if (x360_ref_cache_check(sl, list, ref, ref_pic->parent, 0, need))
+                        continue;
+#endif
+                    ff_thread_await_progress(&ref_pic->parent->tf, need, 0);
                 }
+#if defined(_XBOX)
+                /* Refresh both field slots: each store is the same acquire
+                 * read ff_thread_await_progress uses, so caching a field this
+                 * MB did not await is safe (a later hit on it only skips waits
+                 * that are already satisfied).  The two-field frame-reference
+                 * case above needs both slots to stay coherent. */
+                x360_ref_cache_store(sl, list, ref, ref_pic->parent, 0);
+                x360_ref_cache_store(sl, list, ref, ref_pic->parent, 1);
+#endif
             }
         }
+#if defined(_XBOX)
+    if (x360_prof)
+        sl->x360_prof.t_await += x360_tb() - x360_t0;
+#endif
 }
 
 static av_always_inline void mc_dir_part(const H264Context *h, H264SliceContext *sl,
@@ -333,6 +413,9 @@ static av_always_inline void mc_part_std(const H264Context *h, H264SliceContext 
 {
     const qpel_mc_func *qpix_op   = qpix_put;
     h264_chroma_mc_func chroma_op = chroma_put;
+#if defined(_XBOX)
+    unsigned x360_t = 0;
+#endif
 
     dest_y += (2 * x_offset << pixel_shift) + 2 * y_offset * sl->mb_linesize;
     if (chroma_idc == 3 /* yuv444 */) {
@@ -350,9 +433,15 @@ static av_always_inline void mc_part_std(const H264Context *h, H264SliceContext 
 
     if (list0) {
         H264Ref *ref = &sl->ref_list[0][sl->ref_cache[0][scan8[n]]];
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) x360_t = x360_tb();
+#endif
         mc_dir_part(h, sl, ref, n, square, height, delta, 0,
                     dest_y, dest_cb, dest_cr, x_offset, y_offset,
                     qpix_op, chroma_op, pixel_shift, chroma_idc);
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) sl->x360_prof.t_mcd += x360_tb() - x360_t;
+#endif
 
         qpix_op   = qpix_avg;
         chroma_op = chroma_avg;
@@ -360,9 +449,15 @@ static av_always_inline void mc_part_std(const H264Context *h, H264SliceContext 
 
     if (list1) {
         H264Ref *ref = &sl->ref_list[1][sl->ref_cache[1][scan8[n]]];
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) x360_t = x360_tb();
+#endif
         mc_dir_part(h, sl, ref, n, square, height, delta, 1,
                     dest_y, dest_cb, dest_cr, x_offset, y_offset,
                     qpix_op, chroma_op, pixel_shift, chroma_idc);
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) sl->x360_prof.t_mcd += x360_tb() - x360_t;
+#endif
     }
 }
 
@@ -382,6 +477,9 @@ static av_always_inline void mc_part_weighted(const H264Context *h, H264SliceCon
                                               int pixel_shift, int chroma_idc)
 {
     int chroma_height;
+#if defined(_XBOX)
+    unsigned x360_t = 0;
+#endif
 
     dest_y += (2 * x_offset << pixel_shift) + 2 * y_offset * sl->mb_linesize;
     if (chroma_idc == 3 /* yuv444 */) {
@@ -411,6 +509,9 @@ static av_always_inline void mc_part_weighted(const H264Context *h, H264SliceCon
         int refn0       = sl->ref_cache[0][scan8[n]];
         int refn1       = sl->ref_cache[1][scan8[n]];
 
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) x360_t = x360_tb();
+#endif
         mc_dir_part(h, sl, &sl->ref_list[0][refn0], n, square, height, delta, 0,
                     dest_y, dest_cb, dest_cr,
                     x_offset, y_offset, qpix_put, chroma_put,
@@ -419,7 +520,13 @@ static av_always_inline void mc_part_weighted(const H264Context *h, H264SliceCon
                     tmp_y, tmp_cb, tmp_cr,
                     x_offset, y_offset, qpix_put, chroma_put,
                     pixel_shift, chroma_idc);
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) sl->x360_prof.t_mcd += x360_tb() - x360_t;
+#endif
 
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) x360_t = x360_tb();
+#endif
         if (sl->pwt.use_weight == 2) {
             int weight0 = sl->pwt.implicit_weight[refn0][refn1][sl->mb_y & 1];
             int weight1 = 64 - weight0;
@@ -453,13 +560,25 @@ static av_always_inline void mc_part_weighted(const H264Context *h, H264SliceCon
                                   sl->pwt.chroma_weight[refn1][1][1][1]);
             }
         }
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) sl->x360_prof.t_wt += x360_tb() - x360_t;
+#endif
     } else {
         int list     = list1 ? 1 : 0;
         int refn     = sl->ref_cache[list][scan8[n]];
         H264Ref *ref = &sl->ref_list[list][refn];
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) x360_t = x360_tb();
+#endif
         mc_dir_part(h, sl, ref, n, square, height, delta, list,
                     dest_y, dest_cb, dest_cr, x_offset, y_offset,
                     qpix_put, chroma_put, pixel_shift, chroma_idc);
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) {
+            sl->x360_prof.t_mcd += x360_tb() - x360_t;
+            x360_t = x360_tb();
+        }
+#endif
 
         luma_weight_op(dest_y, sl->mb_linesize, height,
                        sl->pwt.luma_log2_weight_denom,
@@ -477,6 +596,9 @@ static av_always_inline void mc_part_weighted(const H264Context *h, H264SliceCon
                                  sl->pwt.chroma_weight[refn][list][1][1]);
             }
         }
+#if defined(_XBOX)
+        if (xbox360_h264_prof_enabled) sl->x360_prof.t_wt += x360_tb() - x360_t;
+#endif
     }
 }
 
@@ -798,6 +920,10 @@ static av_always_inline void hl_decode_mb_idct_luma(const H264Context *h, H264Sl
 
 void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
 {
+#if defined(_XBOX)
+    const int x360_prof = xbox360_h264_prof_enabled;
+    const unsigned x360_t0 = x360_prof ? x360_tb() : 0;
+#endif
     const int mb_xy   = sl->mb_xy;
     const int mb_type = h->cur_pic.mb_type[mb_xy];
     int is_complex    = CONFIG_SMALL || sl->is_complex ||
@@ -814,4 +940,8 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
         hl_decode_mb_simple_16(h, sl);
     } else
         hl_decode_mb_simple_8(h, sl);
+#if defined(_XBOX)
+    if (x360_prof)
+        sl->x360_prof.t_recon += x360_tb() - x360_t0;
+#endif
 }

@@ -2590,6 +2590,46 @@ static void er_add_slice(H264SliceContext *sl,
     }
 }
 
+#if defined(_XBOX)
+/* Xenon CABAC/recon hotspot split.  Every X360_PROF_MB_WINDOW macroblocks the
+ * owning worker prints its bucket shares of the MB-loop time (mftb ticks):
+ *   cabac  ff_h264_decode_mb_cabac/cavlc (entropy + MB parse + caches)
+ *   pred   intra reconstruction (pred + fused intra4x4 idct-add)
+ *   mc     motion compensation (qpel/chroma/weight; await is a subset)
+ *   mcd    mc_dir_part: qpel/chroma kernels + edge emulation (mc subset)
+ *   wt     weighted prediction glue (mc subset)
+ *   idct   residual reconstruction (idct_luma + chroma idct)
+ *   other  loop bookkeeping (terminate, row end, filter calls)
+ * toggle: game:\x360_play.cfg "prof=1" / p2cfg "prof x 1 0" (xbox360_h264_prof_enabled) */
+#define X360_PROF_MB_WINDOW (8160 * 10) /* 10 frames of 1080p per line */
+
+static void x360_h264_prof_flush(H264SliceContext *sl)
+{
+    const uint64_t base = sl->x360_prof.t_loop ? sl->x360_prof.t_loop : 1;
+    uint64_t acc = sl->x360_prof.t_cabac + sl->x360_prof.t_pred +
+                   sl->x360_prof.t_mc + sl->x360_prof.t_idct;
+    const uint64_t other = acc < base ? base - acc : 0;
+
+    av_log(NULL, AV_LOG_INFO,
+           "[x360-h264prof] id=%03x mb=%u base=%llu "
+           "cabac=%u%% pred=%u%% mc=%u%% idct=%u%% other=%u%% await=%u%% mcd=%u%% wt=%u%%\n",
+           (unsigned)((uintptr_t)sl & 0xfff), sl->x360_prof.n_mb,
+           (unsigned long long)base,
+           (unsigned)(sl->x360_prof.t_cabac * 100 / base),
+           (unsigned)(sl->x360_prof.t_pred * 100 / base),
+           (unsigned)(sl->x360_prof.t_mc * 100 / base),
+           (unsigned)(sl->x360_prof.t_idct * 100 / base),
+           (unsigned)(other * 100 / base),
+           (unsigned)(sl->x360_prof.t_await * 100 / base),
+           (unsigned)(sl->x360_prof.t_mcd * 100 / base),
+           (unsigned)(sl->x360_prof.t_wt * 100 / base));
+
+    sl->x360_prof.t_cabac = sl->x360_prof.t_loop = sl->x360_prof.t_recon = 0;
+    sl->x360_prof.t_pred = sl->x360_prof.t_mc = sl->x360_prof.t_idct = 0;
+    sl->x360_prof.t_await = sl->x360_prof.t_mcd = sl->x360_prof.t_wt = 0;
+}
+#endif
+
 static int decode_slice(struct AVCodecContext *avctx, void *arg)
 {
     H264SliceContext *sl = arg;
@@ -2606,6 +2646,11 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
         return ret;
 
     sl->mb_skip_run = -1;
+
+#if defined(_XBOX)
+    extern void x360_h264_clear_ref_cache(H264SliceContext *sl);
+    x360_h264_clear_ref_cache(sl);
+#endif
 
     av_assert0(h->block_offset[15] == (4 * ((scan8[15] - scan8[0]) & 7) << h->pixel_shift) + 4 * sl->linesize * ((scan8[15] - scan8[0]) >> 3));
 
@@ -2640,6 +2685,10 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
 
         for (;;) {
             int ret, eos;
+#if defined(_XBOX)
+            const int x360_prof = xbox360_h264_prof_enabled;
+            unsigned x360_tl = 0;
+#endif
             if (sl->mb_x + sl->mb_y * h->mb_width >= sl->next_slice_idx) {
                 av_log(h->avctx, AV_LOG_ERROR, "Slice overlaps with next at %d\n",
                        sl->next_slice_idx);
@@ -2648,7 +2697,15 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                 return AVERROR_INVALIDDATA;
             }
 
+#if defined(_XBOX)
+            if (x360_prof) x360_tl = x360_tb();
+#endif
             ret = ff_h264_decode_mb_cabac(h, sl);
+#if defined(_XBOX)
+            if (x360_prof) {
+                sl->x360_prof.t_cabac += x360_tb() - x360_tl;
+            }
+#endif
 
             if (ret >= 0)
                 ff_h264_hl_decode_mb(h, sl);
@@ -2697,6 +2754,16 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                 }
             }
 
+#if defined(_XBOX)
+            if (x360_prof) {
+                sl->x360_prof.t_loop += x360_tb() - x360_tl;
+                if (++sl->x360_prof.n_mb >= sl->x360_prof.next_print) {
+                    if (sl->x360_prof.next_print)
+                        x360_h264_prof_flush(sl);
+                    sl->x360_prof.next_print = sl->x360_prof.n_mb + X360_PROF_MB_WINDOW;
+                }
+            }
+#endif
             if (eos || sl->mb_y >= h->mb_height) {
                 ff_tlog(h->avctx, "slice end %d %d\n",
                         get_bits_count(&sl->gb), sl->gb.size_in_bits);
@@ -2710,6 +2777,10 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
     } else {
         for (;;) {
             int ret;
+#if defined(_XBOX)
+            const int x360_prof = xbox360_h264_prof_enabled;
+            unsigned x360_tl = 0;
+#endif
 
             if (sl->mb_x + sl->mb_y * h->mb_width >= sl->next_slice_idx) {
                 av_log(h->avctx, AV_LOG_ERROR, "Slice overlaps with next at %d\n",
@@ -2719,7 +2790,15 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                 return AVERROR_INVALIDDATA;
             }
 
+#if defined(_XBOX)
+            if (x360_prof) x360_tl = x360_tb();
+#endif
             ret = ff_h264_decode_mb_cavlc(h, sl);
+#if defined(_XBOX)
+            if (x360_prof) {
+                sl->x360_prof.t_cabac += x360_tb() - x360_tl;
+            }
+#endif
 
             if (ret >= 0)
                 ff_h264_hl_decode_mb(h, sl);
@@ -2771,6 +2850,16 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                 }
             }
 
+#if defined(_XBOX)
+            if (x360_prof) {
+                sl->x360_prof.t_loop += x360_tb() - x360_tl;
+                if (++sl->x360_prof.n_mb >= sl->x360_prof.next_print) {
+                    if (sl->x360_prof.next_print)
+                        x360_h264_prof_flush(sl);
+                    sl->x360_prof.next_print = sl->x360_prof.n_mb + X360_PROF_MB_WINDOW;
+                }
+            }
+#endif
             if (get_bits_left(&sl->gb) <= 0 && sl->mb_skip_run <= 0) {
                 ff_tlog(h->avctx, "slice end %d %d\n",
                         get_bits_count(&sl->gb), sl->gb.size_in_bits);

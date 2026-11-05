@@ -158,4 +158,12 @@ av_cold void ff_h264dsp_init(H264DSPContext *c, const int bit_depth,
     if (ARCH_PPC) ff_h264dsp_init_ppc(c, bit_depth, chroma_format_idc);
     if (ARCH_X86) ff_h264dsp_init_x86(c, bit_depth, chroma_format_idc);
     if (ARCH_MIPS) ff_h264dsp_init_mips(c, bit_depth, chroma_format_idc);
+#if defined(XBOX)
+    /* Xenon: VMX128 4x4/8x8 IDCT behind a self check, see xbox360/ */
+    ff_h264dsp_idct_init_x360(c, bit_depth, chroma_format_idc);
+    /* Xenon: VMX128 weighted prediction (put/biweight), self check + C fallback */
+    ff_h264dsp_weight_init_x360(c, bit_depth);
+    /* Xenon: VMX128 deblocking (v/h x luma/chroma x normal/intra), self check */
+    ff_h264dsp_deblock_init_x360(c, bit_depth, chroma_format_idc);
+#endif
 }

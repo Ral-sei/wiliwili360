@@ -150,7 +150,14 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
             }
         }
     } else {
+#if defined(_XBOX)
+        const int x360_prof = xbox360_h264_prof_enabled;
+        unsigned x360_tp = 0, x360_tm = 0, x360_ti = 0;
+#endif
         if (IS_INTRA(mb_type)) {
+#if defined(_XBOX)
+            if (x360_prof) x360_tp = x360_tb();
+#endif
             if (sl->deblocking_filter)
                 xchg_mb_border(h, sl, dest_y, dest_cb, dest_cr, linesize,
                                uvlinesize, 1, 0, SIMPLE, PIXEL_SHIFT);
@@ -167,7 +174,13 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
             if (sl->deblocking_filter)
                 xchg_mb_border(h, sl, dest_y, dest_cb, dest_cr, linesize,
                                uvlinesize, 0, 0, SIMPLE, PIXEL_SHIFT);
+#if defined(_XBOX)
+            if (x360_prof) sl->x360_prof.t_pred += x360_tb() - x360_tp;
+#endif
         } else {
+#if defined(_XBOX)
+            if (x360_prof) x360_tm = x360_tb();
+#endif
             if (chroma422) {
                 FUNC(hl_motion_422)(h, sl, dest_y, dest_cb, dest_cr,
                               h->h264qpel.put_h264_qpel_pixels_tab,
@@ -185,8 +198,14 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
                               h->h264dsp.weight_h264_pixels_tab,
                               h->h264dsp.biweight_h264_pixels_tab);
             }
+#if defined(_XBOX)
+            if (x360_prof) sl->x360_prof.t_mc += x360_tb() - x360_tm;
+#endif
         }
 
+#if defined(_XBOX)
+        if (x360_prof) x360_ti = x360_tb();
+#endif
         hl_decode_mb_idct_luma(h, sl, mb_type, SIMPLE, transform_bypass,
                                PIXEL_SHIFT, block_offset, linesize, dest_y, 0);
 
@@ -244,6 +263,9 @@ static av_noinline void FUNC(hl_decode_mb)(const H264Context *h, H264SliceContex
                                           sl->non_zero_count_cache);
             }
         }
+#if defined(_XBOX)
+        if (x360_prof) sl->x360_prof.t_idct += x360_tb() - x360_ti;
+#endif
     }
 }
 

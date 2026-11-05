@@ -369,6 +369,9 @@ OBJS-$(CONFIG_H264_DECODER)            += h264dec.o h264_cabac.o h264_cavlc.o \
                                           h264_mb.o h264_picture.o \
                                           h264_refs.o h264_sei.o \
                                           h264_slice.o h264data.o
+OBJS-$(CONFIG_H264_DECODER)            += xbox360/h264_vmx.o xbox360/h264_qpel_vmx.o \
+                                          xbox360/h264_idct_vmx.o xbox360/h264_weight_vmx.o \
+                                          xbox360/h264_deblock_vmx.o
 OBJS-$(CONFIG_H264_AMF_ENCODER)        += amfenc_h264.o
 OBJS-$(CONFIG_H264_CUVID_DECODER)      += cuviddec.o
 OBJS-$(CONFIG_H264_MEDIACODEC_DECODER) += mediacodecdec.o
@@ -1297,3 +1300,12 @@ $(SUBDIR)pcm.o: $(SUBDIR)pcm_tables.h
 $(SUBDIR)qdm2.o: $(SUBDIR)qdm2_tables.h
 $(SUBDIR)sinewin.o: $(SUBDIR)sinewin_tables.h
 endif
+
+# Xenon (Xbox 360) VMX128 kernels.  Only this file gets -maltivec: the rest of
+# the tree stays scalar because Xenon dropped 22 vector integer multiply-add
+# instructions, so letting auto-vectorisation loose anywhere else can emit
+# instructions the CPU does not have.  See xbox360/h264_vmx.c.
+$(SUBDIR)xbox360/h264_vmx.o $(SUBDIR)xbox360/h264_qpel_vmx.o \
+    $(SUBDIR)xbox360/h264_idct_vmx.o $(SUBDIR)xbox360/h264_weight_vmx.o \
+    $(SUBDIR)xbox360/h264_deblock_vmx.o: \
+    CCFLAGS += -maltivec -fno-vectorize -fno-slp-vectorize

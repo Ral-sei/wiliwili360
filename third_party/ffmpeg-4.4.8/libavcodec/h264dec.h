@@ -284,6 +284,34 @@ typedef struct H264SliceContext {
 
     unsigned int pps_id;
 
+#if defined(_XBOX)
+    /* Per-slice reference-progress cache (Xbox 360).  ff_thread_await_progress
+     * takes a mutex + condvar per call; with frame threading a slice checks the
+     * same reference dozens of times.  Caching the last-known progress value
+     * lets repeated checks skip the lock entirely (measured 132 万 checks /
+     * 543 real waits in the reference player's REFCACHE).
+     * progress[] is tracked PER FIELD and must mirror the (pic, field) key of
+     * ff_thread_await_progress exactly: field-1 waits must never be satisfied
+     * by field-0 progress.  Slots start at -1 (what a fresh progress buffer
+     * reports), so an unstored slot behaves like "nothing acquired yet". */
+    struct {
+        const struct H264Picture *ref;
+        int progress[2];
+        int valid;
+    } x360_ref_cache[2][48];
+    int x360_ref_cache_active;
+
+    /* Window-sum cycle buckets (mftb ticks), one H264SliceContext per worker
+     * thread so plain adds are race-free.  t_await ⊂ t_mc ⊂ t_recon; the
+     * [x360-h264prof] flush prints shares of t_loop and resets the buckets. */
+    struct {
+        uint64_t t_cabac, t_loop, t_recon, t_pred, t_mc, t_idct, t_await;
+        uint64_t t_mcd, t_wt;
+        unsigned int n_mb;
+        unsigned int next_print;
+    } x360_prof;
+#endif
+
     const uint8_t *intra_pcm_ptr;
     int16_t *dc_val_base;
 
@@ -646,6 +674,20 @@ void ff_h264_filter_mb(const H264Context *h, H264SliceContext *sl, int mb_x, int
 
 #define LUMA_DC_BLOCK_INDEX   48
 #define CHROMA_DC_BLOCK_INDEX 49
+
+#if defined(_XBOX)
+/* Xenon CABAC/recon cycle-counter split (Xbox 360).  mftb is one mfspr on
+ * this in-order core; a measured region costs two reads plus one add.
+ * Disabled runs pay a single predictable branch per region and no reads. */
+extern int xbox360_h264_prof_enabled;
+static inline unsigned x360_tb(void)
+{
+    unsigned v;
+    __asm__ volatile("mftb %0" : "=r"(v));
+    return v;
+}
+void x360_h264_clear_ref_cache(H264SliceContext *sl);
+#endif
 
 // This table must be here because scan8[constant] must be known at compiletime
 static const uint8_t scan8[16 * 3 + 3] = {

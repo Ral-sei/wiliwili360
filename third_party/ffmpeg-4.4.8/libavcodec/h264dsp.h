@@ -125,6 +125,9 @@ void ff_h264dsp_init_arm(H264DSPContext *c, const int bit_depth,
                          const int chroma_format_idc);
 void ff_h264dsp_init_ppc(H264DSPContext *c, const int bit_depth,
                          const int chroma_format_idc);
+void ff_h264dsp_idct_init_x360(H264DSPContext *c, int bit_depth, int chroma_format_idc);
+void ff_h264dsp_weight_init_x360(H264DSPContext *c, int bit_depth);
+void ff_h264dsp_deblock_init_x360(H264DSPContext *c, int bit_depth, int chroma_format_idc);
 void ff_h264dsp_init_x86(H264DSPContext *c, const int bit_depth,
                          const int chroma_format_idc);
 void ff_h264dsp_init_mips(H264DSPContext *c, const int bit_depth,
