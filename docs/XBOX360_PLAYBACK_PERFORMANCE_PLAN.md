@@ -636,7 +636,7 @@ WSL 重置后本机构建环境迁移（工具链 `/home/lbx/*` → 现址），
 - 退出确认框停留期（20:26:58~20:28:26）恒定 38fps / build 25.2ms——底页每帧全量重建，独立候选。
 - 启动首窗 `slow sync task 1368ms from rcmd`（冷启动推荐流首批，既有特征）。
 
-**限制与归因**：7× 为三项改动（dcbt 预取 + 128B 对齐 + hw5 分区）的合并效果，未做单项消融；线程亲和性无日志可核（§15.2 第 3 项），建议下轮在 task_loop/弹幕线程 setup 后补 `DbgPrint("[x360-thread] tid %lu processor %ld")` 一行以复核。1080p upload 基线仍待补。
+**限制与归因**：7× 为三项改动（dcbt 预取 + 128B 对齐 + hw5 分区）的合并效果，未做单项消融；线程亲和性无日志可核（§15.2 第 3 项），建议下轮在 task_loop/弹幕线程 setup 后补 `DbgPrint("[x360-thread] tid %lu processor %ld")` 一行以复核。1080p upload 基线已于 2026-11-02 补齐（3038 KiB/帧 → 4.6~5.0ms，见 §15.8）。
 
 ### 15.6 round-8：pthread 优先级分层 + 线程探针（2026-10-10，候选关闭）
 
@@ -665,3 +665,336 @@ WSL 重置后本机构建环境迁移（工具链 `/home/lbx/*` → 现址），
 **日志**：`%LOCALAPPDATA%\xbox360-tools\kdnet\kd.log`（round-8b 场次）；round-7 干净场 `logs/round7_20261010_xbdm_playback.txt`。
 
 
+
+### 15.8 1080p 上传病理：pitch 对齐（2026-11-02，已实施）
+
+**背景**：§15.5 的 720p 上传已降至 1.6~1.75ms，但 1080p 源（surface 1920×1080，
+3038 KiB/帧）实测 4.59~5.0ms，约 660 MB/s，比 1440×1080（2278 KiB → 1.48ms，
+~1540 MB/s）按字节慢 2.3×。本节点补齐该尺寸的基线并归因。
+
+**探针（`xbox360_yuv.cpp`，`RUNTIME_PROBES=1`）**：`uploadPlane` 一次性打印
+`locked.Pitch` vs `sourcePitch` 与所走分支，flush 增加 lock/copy 拆时和 bulk/row 计数：
+
+```text
+[x360-perf] yuv plane pitch: source 1920 locked 2048 (1920x1080) -> row path
+[x360-perf] yuv plane pitch: source 960  locked 1024 (960x540)   -> row path
+[x360-perf] yuv upload split: lock 0.38 ms, copy 46.71 ms, bulk 0 plane(s), row 30 plane(s)
+```
+
+**归因**：Xenon D3D9 驱动对线性 L8 纹理的 `LockRect` pitch **按 256 B 向上取整**
+（实测 896→1024、448→512、1920→2048、960→1024）。`setFrameSize` 的旧公式按 128 B
+对齐，于是 1920/960 两档源 stride 小于纹理 pitch，`uploadPlane` 落回逐行拷贝
+（2160 次/帧，~660 MB/s）；1440/1280 等 256 整数倍宽度则保持整平面单次拷贝
+（~1540 MB/s）。**不是缺向量化**——逐行路径同样走 `XMemCpyStreaming_WriteCombined`。
+
+**对策（Option S）**：`Xbox360YUVRenderer::planePitch(w,h)` 建好该尺寸平面后
+`LockRect` 读回真实 pitch；`MPVCore::setFrameSize` 用它作为 mpv 的
+`MPV_RENDER_PARAM_SW_STRIDE`（失败时回退 128 B 公式）。mpv 按新 stride 写，色度
+stride 仍取 `stride/2`（`libmpv_sw.c` 既有约定），因此 1920→2048 同时使色度
+960→1024 命中，三平面全部 bulk。代价：I420 缓冲 3110→3318 KiB（+6.6%），
+每次尺寸切换多一次 `LockRect`。
+
+**实测（同机、RUNTIME_PROBES=1，1080p 播放稳态）**：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| `yuv plane upload` avg/p95/max | 4.67~5.00 / 4.91 / 4.95 ms | **2.01~2.10 / 2.15~2.26 / ≈2.5 ms** |
+| 分支 | row 3 平面 | **bulk 3 平面** |
+| copy / lock | ~4.3 / ~0.35 ms | ~1.9 / ~0.4 ms |
+| 有效吞吐 | ~660 MB/s | ~1700 MB/s（含 padding 3240 KiB） |
+
+同轮 800×450 窗口回退面也由 row(1.32ms) 变 bulk(0.39ms)。画面经截图核验
+（`logs/pitchfix_play.bmp`）无色偏/色度偏移。**每帧省 ~2.6ms 主线程**。
+
+**逐尺寸基线（2026-11-02 采集，RUNTIME_PROBES=1）**：
+
+| surface | 上传字节 | 修复前 | 修复后 |
+|---|---|---|---|
+| 800×450 | 527 KiB | 1.02 ms（row） | 0.39 ms（bulk） |
+| 854×480 | 599 KiB | 0.64 ms（row） | （按同一规则变 bulk，未复测） |
+| 960×720 | 1012 KiB | 1.24 ms | 1.24 ms（pitch 不变） |
+| 1280×720 | 1350 KiB | 1.62 ms | 1.62 ms（Y bulk / 色度仍 row：1280 是 256 倍数但 640 不是） |
+| 1440×1080 | 2278 KiB | 1.48 ms（bulk） | 1.48 ms（pitch 不变） |
+| **1920×1080** | **3038 KiB** | **4.59~5.00 ms（row）** | **2.01~2.10 ms（bulk）** |
+
+**遗留**：宽度为 256 整数倍、但一半不是（1280、640、1792…）时色度平面仍逐行拷贝；
+若需消除，须把纹理建为 pitch 宽并同步缩放取样 UV（色度、亮度各一套），属可选后续。
+
+**同轮另两项（已实机验证）**：① `libmpv_sw.c` 条件化清屏——整面覆盖时跳过
+`sw_clear_black`（clear 1.83→0.00ms）；② `vd-lavc-skiploopfilter=nonref` +
+`vd-lavc-fast`。两项后 mpv render 调用 4.9~5.2→3.14~3.24ms（1080p，copy/sws 30/0）。
+
+**范围外**：本会话观察到的偶发 VO 掉帧爬升 / avsync 漂移 / 音频欠载为既有网络无关
+问题，重启应用即恢复，不在本节修复范围内。
+
+### 15.9 1080p 音画不同步：根因是解码吞吐，对策 CATCHUP（2026-11-02）
+
+**现象**：§15.8 的上传优化落地后，1080p 仍「音画不同步、画面明显拖慢」。用户复测复现。
+
+**排除渲染路径**：改前（row path，sync 队列延迟仅 10 ms）与改后（bulk，upload 2.05 ms）
+avsync 增长速度一致；mpv render 2.6 ms + 上传 2.05 ms + 提交 0.3 ms ≈ 5 ms/帧，
+远低于 33 ms 预算。上传从来不是这个症状的原因。
+
+**量化方法**：`avsync` 的斜率直接给出视频时钟倍率
+（`video_clock = 1 - d(avsync)/dt`；音频实测 1.0×）。`est-vf` 只是容器帧率，
+`decoder 丢帧 0` 也不代表解码跟得上 —— 两个都不能用来判断解码能力。
+
+**运行时扫点（`game:\x360_play.cfg`，同一段 1080p30，30 s 窗口）**：
+
+| 配置 | video_clock | 推算解码 | VO 丢帧/s |
+|---|---|---|---|
+| 3 worker, vmx=1（用户当时配置） | 0.51× | ~15 fps | 8.3 |
+| 5 worker, vmx=1 | 0.56× | ~17 fps | 10.0 |
+| 6 worker, vmx=1 | **0.66×** | **~20 fps** | 11.1 |
+| 6 worker, vmx=0 | 0.65× | ~20 fps | 12.1 |
+
+- **线程数**是当前最有效的运行时杠杆：6 worker 比 3 worker 快约 30%。
+- **VMX 内核开/关在整机内测不出差异**：与 P6 §9.1 独立 harness 的 +6.6%
+  （14.04→14.97 fps @3t）一致，落在播放噪声里。chroma/qpel/IDCT 不是 1080p 的瓶颈。
+- 即便最优配置也只有 ~20 fps，**1080p30 全帧解码在这套 CPU/解码器上不成立**
+  （参考播放器对 H.264 同样靠预设丢非参考帧，见其 REPORT_zh §9）。
+
+**对策：CATCHUP（丢非参考帧保同步）** —— 对齐参考播放器的 H.264 preset 2：
+
+- `mpv_core.cpp` Xbox `LOW_QUALITY` 分支新增 `vd-lavc-skipframe=nonref`
+  （与既有 `vd-lavc-skiploopfilter=nonref` 并存）；H.264 解码器跳过非参考图像，
+  解码量约减半，视频时钟跟上音频，运动表现为跳帧而非慢放。
+- 新增运行时开关（`game:\x360_play.cfg`）：`skipframe=no|bidir|nonref|all`、
+  `skiploop=nonref|all`，便于不重编 A/B。
+
+**A/B（6 worker，同一段 1080p30）**：
+
+| 配置 | video_clock | avsync 斜率 | VO 丢帧/s |
+|---|---|---|---|
+| `skipframe=no`（基线） | 0.80× | +0.197 s/s | 7.6 |
+| `skipframe=nonref` | **1.00×** | **-0.004 s/s** | **0.2** |
+| `skipframe=nonref` + `skiploop=all` | 0.97× | +0.029 s/s | 9.8（该场次 cache 掉到 5.5 s，网络侧干扰） |
+
+结论：`skipframe=nonref` 是唯一把音画拉回同步的配置（斜率≈0），且不再有 VO 丢帧；
+再加 `skiploop=all` 无额外收益。**保持 `skiploop=nonref`（画质优先）+ `skipframe=nonref`。**
+
+**配套配置**：`game:\x360_play.cfg` 建议 `vd_threads=6`（原 3 为历史实验值）。
+`spread=2,4,3,5` 维持不变：六项表 `{1,3,5,2,0,4}` 在播放器内会与主线程抢 hw0。
+
+**遗留**：丢非参考帧后实际呈现约 8 fps（跳帧观感）；若要同时提高呈现率，
+只能继续提升解码吞吐（P6 未覆盖的 CABAC 等），不在本节点范围。
+
+### 15.9 1080p 音画不同步：解码吞吐天花板与 CATCHUP（2026-11-02）
+
+**症状**：1080p30 H.264（`h264 1920x1080 30.000fps`）画面明显慢放，`avsync` 单调增长，
+越播越不同步。§15.8 的上传优化（4.6→2.0 ms）与此无关：改前/改后的 avsync 斜率相同。
+
+**定量（RUNTIME_PROBES=1，由 `[x360-mpv]` 的 avsync 斜率反推视频时钟，音频恒为 1.0×；
+解码吞吐 ≈ 视频时钟 × 30）**：
+
+| 配置（spread=2,4,3,5） | 视频时钟 | VO 丢帧/s |
+|---|---|---|
+| 3 线程, vmx=1（原 cfg） | 0.51×（≈15 fps） | 8.3 |
+| 5 线程, vmx=1 | 0.56×（≈17 fps） | 10.0 |
+| 6 线程, vmx=0 | 0.65×（≈20 fps） | 12.1 |
+| 6 线程, vmx=1 | 0.66×（≈20 fps） | 11.1 |
+| 6 线程, skipframe=no（稳态段） | 0.80×（≈24 fps） | 7.6 |
+
+- **`decoder 丢帧 0` 不等于解码跟得上**：它只统计解码器主动丢弃的帧；`est-vf 30.00`
+  也只是容器帧率估计。真正的判据是 avsync 斜率/视频时钟。
+- VMX 内核（chroma MC / qpel / IDCT 已接入，日志 `x360 h264 ...: VMX128 kernels on`）
+  开/关在同一场次无差异；P6 独立 harness 也只有 14.04→14.97 fps（3 线程，+6%）。
+  即这些内核不是 1080p 的瓶颈，继续手写同类内核收益有限。
+- 线程数是最有效的廉价杠杆：3→6 线程视频时钟 0.51→0.66×。
+
+**对策 CATCHUP**（对齐参考播放器的 H.264 第二档预设）：`vd-lavc-skipframe=nonref`
+不解码非参考帧，并叠加 `vd-lavc-skiploopfilter=all` 关闭去块滤波，视频时钟跟随音频。
+同一场次 A/B（6 线程，`x360_play.cfg` 覆盖）：
+
+| 配置 | avsync 斜率 | 视频时钟 | 呈现帧率 | VO 丢帧/s |
+|---|---|---|---|---|
+| skipframe=no, skiploop=nonref | +0.197 s/s | 0.80× | 6.3 fps | 7.6 |
+| skipframe=nonref, skiploop=nonref | +0.177 s/s | 0.82× | 5.6 fps | 5.4 |
+| **skipframe=nonref, skiploop=all** | **+0.002 s/s** | **1.00×** | 6.6 fps | **0.5** |
+| skipframe=bidir, skiploop=all | +0.000 s/s | 1.00× | 5.8 fps | 1.1 |
+
+关键发现：**只丢非参考帧不够**（0.82×），参考帧的去块滤波才是最后 ~15% 解码时间；
+两者叠加才能把时钟拉回 1.00×。画面变为跳帧（约 6–8 张/秒，时间轴正确），音画完全
+同步；这是本硬件上 1080p30 的唯一可行形态——参考实现同样对 H.264 提供 CATCHUP
+（`skip_frame=NONREF` + `skip_loop_filter=ALL`）预设。`bidir` 变体同样同步且丢帧更少，
+保留为 cfg 可选项。
+
+**解码吞吐侧的其它尝试（2026-11-02）**：
+
+- **切片线程不可用**：`vd-lavc-o=thread_type=slice`（cfg `avopts=` 可配）在
+  `BV1TP411Y7bt` 1080p 上视频时钟掉到 **0.49×**——该码流切片数不足以并行，FFmpeg
+  默认的帧线程（`slice|frame` → frame 优先）才是正确选择。
+- **4 worker 基线复测**（纯净 cfg）：avsync 0.00→0.01 / 65 s，起始 1.56 s 的偏移
+  被完全追回，0 次欠载，视频时钟 1.00×。
+- **`skipframe=bidir` 对照**：同样同步（斜率 0.001，VO 掉帧 0.3/s），但呈现帧率
+  5.4 fps，低于 `nonref` 的 6.3 fps（`est-vf` 10–14 vs 18–20）——所以默认仍用
+  `nonref`，bidir 仅作为 cfg 可选项。
+- **weighted prediction VMX128 已接入**（`libavcodec/xbox360/h264_weight_vmx.c`，此前
+  写好未接入；`ff_h264dsp_weight_init_x360()` + 运行时自检 + C 回退，`libavcodec.a`
+  已重建）。`BV1TP411Y7bt` 实测：呈现 6.4 vs 6.3 fps、`est-vf` 相当、同步无变化
+  → 该码流几乎不用加权预测，收益在噪声内；保留（自检保护、零实测代价，对使用加权
+  预测的码流才有意义）。
+- **结论**：配置层（线程/绑核/切片/跳过策略）与现有 VMX 内核的吞吐挖掘到此为止；
+  再往上需要 CABAC 熵解码级别的剖析与改写（尚未开始，工作量与风险都大）。
+
+**与参考播放器的同文件对比（2026-11-02，排除内容差异）**：参考播放器
+（`H:\Xbox360MediaPlayer.Alpha10-ZorgX`）的日志显示它解码 `KontonBoogie.mp4`
+（1920x1080 H.264 High L4.0，**refs=1**，2.55 Mbps）为 `decoded_fps=30.10`、
+`preset=0`（全帧 + 全去块）、5 worker。用我们的解码器（`tests/p2_decode`，
+FFmpeg 4.4.8 + 现有 VMX 内核，5 线程，spread）解码**同一个文件**：
+4639 帧 / 155.2 s = **29.9 fps（稳态窗口 32.6 fps，0 错误）**。
+→ 两边解码能力相当；B 站 1080p 流（refs/码率更高）在播放器里全帧只有 ~17–20 fps
+是**内容更重**，不是解码器落后。参考播放器的 30 fps 结论不可外推到 B 站流。
+`vc`：p2_decode 重新链到 `build/ffmpeg-x360-tls/libavcodec.a`（含 weight VMX）。
+
+**两条流的 SPS 对比（`[x360-sps]` 探针，2026-11-02）**：
+
+| | profile | level | max_num_ref_frames | 尺寸 | 播放器内全帧解码 |
+|---|---|---|---|---|---|
+| 参考播放器的本地 mp4 | High (100) | 4.0 | **1** | 1920×1080 | 我们的解码器 29.9 fps（harness） |
+| wiliwili 播的 B 站 DASH 流 | High (100) | 5.0 | **8** | 1920×1088 | ~17–20 fps |
+
+**refs 消融实验（2026-11-02）**：把同一素材用 x264 重编码为 High@L5.2、`refs=8`、
+2.29 Mbps（trace_headers 确认 `max_num_ref_frames=8`）：
+
+| 被测对象 | 原文件（refs=1, 2.55 Mbps） | 重编码（refs=8, 2.29 Mbps） |
+|---|---|---|
+| 参考播放器 | 30.10 fps | **30.10 fps**（0 丢帧） |
+| 我们的解码器（p2_decode harness，5 线程） | 29.9 fps（155.2 s / 4639 帧） | **31.6 fps（146.8 s / 4639 帧）** |
+
+→ **refs 不是瓶颈**：两边在同码率下都能 30 fps，refs=8 甚至略快（编码细节差异）。
+B 站流在播放器里只有 ~17–20 fps 的差异只能来自**码率/残差密度更高**（约 3× 本地文件）
+与播放器内 UI 争核，而不是参考帧数量或解码器代际。要最终判定参考播放器能否吃下
+B 站流，只能把 B 站码流录下来喂给它（`--stream-record`），目前未做。
+
+**另两个必要条件（2026-11-02 追加实测）**：
+
+1. **worker 数 4 + 绑核 `2,4,3,5`**：CATCHUP 只解参考帧后，工作量恰好装进 4 个
+   worker 硬件线程，1:1 不超订，且全部避开核 0（主线程）。120 s 场次：
+   avsync 0.01→0.40（斜率 0.003，视频时钟 1.00×），中途一次 7.6 s 的瞬态被**完全追回**
+   （VO 掉帧 0.4/s）。对照：同 4 worker 但用 shim 内置 6 项表 `{1,3,5,2,0,4}` → 0.96×
+   （worker 5/6 落到 hw0 与主线程抢核）；6 worker 超订 → 0.97×，~2 s/min 慢漂移。
+   CATCHUP 档因此在 `MPVCore::init()` 里显式设 `vd-lavc-threads=4` 并调用
+   `xbox360_pthread_set_spread_cpus({2,4,3,5})`；cfg 的 `vd_threads=`/`spread=` 仍可覆盖，
+   非 CATCHUP 路径维持 6 worker 与 shim 默认表。
+   端到端复测（同一构建、纯净 cfg）：avsync 0.17→1.86 / 121.7 s（斜率 0.014，视频时钟
+   0.99×，VO 掉帧 0.9/s）；理想场次为 0.003（1.00×）。残余差异来自单次启动期音频欠载与
+   场景复杂度波动，已比原 0.2 s/s（2 分钟漂 24 s）改善一个数量级。
+2. **音频设备缓冲 1.0 s**（`--audio-buffer=1.0`，`ao_xaudio2` 按此分配设备环）：
+   默认 0.2 s 时 1080p 启动期会出现 `Audio device underrun`，欠载会把音频时钟前跳，
+   跳帧策略无法追回（实测 2 分钟携带 ~2 s 偏移）。1.0 s 场次欠载 0 次，播放期无感
+   （只影响暂停/起播的音频起振）。
+
+**落地（wiliwili 侧，运行时可覆盖）**：
+- **必须作为 mpv 初始化参数设置**：运行时 `set vd-lavc-skipframe` / `mpv_set_property_string()`
+  会被 mpv 接受、属性回读也正确，但解码器不采用（实测 avsync 仍 +0.18 s/s、
+  `est-vf` 停在 18–22）。`mpvSetOptionString()` 在 `mpv_initialize()` 之前设置才生效。
+- `MPVCore::init()` 按持久化的 `VIDEO_QUALITY`（>=80）设初值；`MPVCore::setSkipNonRefFrames(bool)`
+  由 `player_base_activity` 在打开 DASH 视频时按 `v.height >= 1080`、FLV/直播按
+  `quality >= 80` 请求；若请求值与当前 mpv 实例不同，`setUrl` 在 `loadfile` 前调用既有
+  `restart()` 重建 mpv（每次清晰度切换至多一次，常见路径因持久化清晰度已匹配而不触发）。
+- 720p 保持全帧（默认清晰度 64 不受影响）。
+- CATCHUP 档同时设 `vd-lavc-skiploopfilter=all`（缺它只有 0.82×）、
+  `vd-lavc-threads=4`（cfg 的 `vd_threads=` 仍可覆盖）与 `audio-buffer=0.5`。
+- `game:\x360_play.cfg` 的 `skipframe=` / `skiploop=` 仍可覆盖门控，用于 A/B。
+- 1080p 全帧解码在当前 CPU 上不可达；要全帧只能继续提解码吞吐（CABAC 等未做，
+  收益与风险未知）。
+
+### 15.9 补遗：REFCACHE 负结果与解码 worker 绑核表（2026-11-02 实施，结论沉淀）
+
+- **REFCACHE（逐切片参考进度缓存）无收益**：缓存命中可跳过
+  `ff_thread_await_progress` 的互斥量+条件变量，但 A/B 实测 16–18 fps
+  （开）≈ 17 fps（关）——**互斥量等待不是瓶颈，帧依赖链才是**。代码保留在
+  `h264_mb.c`（`x360_ref_cache_*`，零害），不要在此基础上继续投入。
+- **解码 worker 绑核表**：pthread 兼容层把 `lavc/frame` 线程钉到
+  `{1,3,5,2,4}`（每核第二硬线程优先，避开 hw0 的主线程），BELOW_NORMAL 优先级。
+  试过 `{1,5,2,4,0}` 会与主线程抢 hw0，整体掉到 ~13 fps（回退）。
+  播放器内 CATCHUP 档覆盖为 4 项 `{2,4,3,5}`（1:1 不超订，见 §15.9）。
+
+### 15.10 CABAC/重建热点剖析与多块 IDCT 分发修复（2026-11-03）
+
+**问题**：REFCACHE/绑核挖掘尽后，1080p 全帧解码仍停在 ~20 fps（p2 harness,
+bbb_1080, 3 worker）。剩余差距在帧内单线程临界路径的哪里？VMX128 覆盖了
+CABAC 解码和残差/帧内重建内核吗，还是标量兜底在主导？
+
+**仪器（持久化，见 `XBOX360_RUNTIME_KNOBS.md` §3）**：`prof=1` 开关下，
+libavcodec 的 H.264 解码器用 `mftb`（Xenon 上编译为单条 `mfspr`）按宏块
+累积周期桶，每 10 帧 1080p 打一行 `[x360-h264prof]`：cabac（熵解码+MB 解析）、
+pred（帧内重建）、mc（运动补偿，含 await/mcd/wt 子桶）、idct（残差重建）、other。
+
+**静态发现（第一问的答案）**：
+
+| 路径 | VMX128 覆盖 | 备注 |
+|---|---|---|
+| CABAC 熵解码 | **无**（全平台皆标量，`cabac_functions.h` 仅 x86/arm/mips 有汇编） | 逐 bin 串行，天然不可 SIMD |
+| 残差重建 4x4 IDCT | 有（P6 M4） | **但此前多块 helper 绕过了它**，见下 |
+| 帧内预测 pred4x4/8x8/8x8l/16x16 | **无**（`h264pred.c` 无 x360 接入） | P6 计划从未覆盖 |
+| chroma MC / qpel / weight | 有（P6 M1/M2/M3） | — |
+| 去块滤波 | CATCHUP 跳过 | — |
+
+**多块 IDCT 分发绕过（本轮修复）**：`h264idct_template.c` 的
+`ff_h264_idct_add16` / `add16intra` / `add8` / `add8_422` 在循环内**直接调用
+静态 C 单块函数**，不走 `H264DSPContext` 函数指针——P6 M4 换上的 VMX 单块
+内核只覆盖 intra4x4 路径，P/B 帧残差重建一直是标量。这正是当时
+"IDCT 收益在噪声里"（P6 §9.2）的真正原因。修复：`xbox360/h264_idct_vmx.c`
+新增四个多块包装（逐条复刻 C 的分发语义，含 `nnz==1` DC 快路径与 422 变体
+的 i+4 索引怪癖），运行时自检对拍 C helper，失配回退；4:2:2 走同一
+`h264_idct_add8` 槽位（init 收 chroma_format_idc 决定装哪个）。
+
+**剖析数据（bbb_1080.h264 1080p60 High@L4.2 CABAC，600 帧，spread，skiplf=1）**：
+
+| 运行 | fps | base (mftb/10帧/线程) | cabac | pred | mc | 其中 await | 其中 mcd | 其中 wt | idct |
+|---|---|---|---|---|---|---|---|---|---|
+| 3w prof | 19.3–20.3 | 71–74 M | 15% | 0% | 79% | 9–10% | 56% | 10% | 1% |
+| 6w prof | 18.1 | 151 M | 12% | 0% | 83% | 34% | — | — | 1% |
+| 3w vmx=0 | 11.6–15.9 | 89–121 M | 12% | 0% | 83% | 9–11% | 54% | 15% | 1% |
+
+（TB=50 MHz：71M ticks/10帧 ≈ 142 ms/帧/线程 ≈ 900 ticks/宏块；mcd =
+`mc_dir_part`（qpel/chroma 内核 + 边界仿真），wt = 加权预测胶水，均 mc 子集。）
+
+**结论**：
+
+1. **MC 才是临界路径（~80%），不是 CABAC（15%）**。CABAC 全标量属实，
+   但即使完全消掉也只有 +18% 上限；帧内预测 ≈0%（inter 主导内容）；
+   残差 IDCT 修复后也只 ~1%（该码流码率低、残差稀疏）。
+2. **MC 是内存受限，不是标量兜底**：mcd 子桶在 vmx=1 下仍占 55%；
+   6 worker 时每线程周期翻倍（71M→151M）且桶占比不变——共享资源
+   （内存/L2）饱和，加线程不加吞吐。VMX 内核把 mcd/weight 压到 C 的
+   1/1.4–1/2.2（**vmx=0 A/B 实测吞吐 -20~-45%**），但撞的是带宽墙。
+   6-tap qpel 每宏块读参考行 ~3 帧面积，refs=8 时随机 MV 的工作集远超
+   1 MB L2——软件侧无杠杆（prefetch_motion 已在）。
+3. **"23→31 fps 差距"的前提不成立**：同文件对比（§15.9 refs 消融）我们
+   31.6 fps vs 参考播放器 30.10 fps（refs=8 重编码）——**同内容下解码能力
+   相当甚至略快**。差距来自 B 站码流内容更重（两边都掉：参考播放器在
+   B 站流上也只有 17–20 fps），不是解码器落后。
+4. 旧结论"VMX 内核开/关无差异"（§15.9）**已被更严格的 harness A/B 推翻**：
+   当时多块 IDCT 未接入（vmx=1 的收益面小），且播放器内测量噪声大。
+   现在 vmx=0/1 = 11.6–15.9 vs 19.2–20.3 fps。**内核保留且是主要抓手之一。**
+5. **接受为硬上限**：全帧 1080p30 在这套内存子系统上 ≈20–25 fps 封顶，
+   与 worker 数无关；CATCHUP（丢非参考帧 + 跳去块）仍是 1080p 的正确形态。
+   再往上只剩低期望值选项（emu_edge 拆分、bipred scratchpad 消除、
+   参考帧布局），除非内容侧（码率/refs）变化，不再投入。
+
+**顺带修复**：`h264_mb.c` 的 `#include "libavutil/atomic.h"`（树里不存在，
+REFCACHE 遗留）改为 `<stdatomic.h>`；两处 `typeof` 改 `__typeof__`（该编译
+选项下 GNU 扩展不可用）；`x360_h264_clear_ref_cache` 补原型声明——此前
+工作区状态实际编不过，本轮一并修掉。
+
+**整机播放流畅度验收（2026-11-03，`XBOX360_RUNTIME_PROBES=1` 构建，
+BV1TP411Y7bt 1080p30 DASH，CATCHUP 默认档，UI 开评论区 50fps 在跑）**：
+
+| 指标 | 实测 | 判定 |
+|---|---|---|
+| avsync（每个 2:34 完整播放段） | 0.000 → +0.002 / +0.005 s | 时间轴正确，视频时钟 1.00× |
+| 音频欠载 | **0 次**（234 s 窗口） | ✓ |
+| decoder 丢帧 | 0 | ✓ |
+| VO 丢帧 | 0.45–2.8/s（CATCHUP 跳帧呈现形态） | 与 §15.9 基线一致 |
+| est-vf | 18–22（只解参考帧） | 支撑时间轴 |
+| 循环重播 | 2:34 内容 = 2:35 墙钟 × 多轮 | 逐轮验证 1.00× |
+
+- avsync 孤立尖峰（0.7–1.9 s，出现在循环 seek 处）**当场完全追回**，不残留漂移。
+- 解码吞吐实测（`[x360-dec]` 窗口）：平均 19 fps、10–30 波动；真实 B 站流
+  与本地素材（§15.9 refs 消融）结论一致——**解码能力不输参考播放器**。
+- 结论：1080p 在本硬件上的可行形态维持 CATCHUP（跳帧呈现 + 音画同步），
+  本轮内核修复（多块 IDCT/weight）不改变形态，但 vmx 路径实测快 20–45%，
+  为网络/渲染抖动留出更多余量。

@@ -452,7 +452,7 @@ stb_image 实现。这些必须在 M4 transport/runtime slice 中补齐，不能
 - [x] 将 `HttpRequest` 抽象成 wiliwili 可使用的响应接口。
 - [x] 初始化 `XNetStartup`，再调用 `WSAStartup`。
 - [x] 接入 XNet DNS resolver。
-- [ ] 接入 CA bundle、hostname 校验、证书有效期校验（当前开发机未部署 CA bundle，Xbox 分支暂时关闭 TLS 校验）。
+- [x] 接入 CA bundle、hostname 校验、证书有效期校验（2026-10-26：Mozilla bundle 内嵌进 XEX，默认开启校验，见 `XBOX360_TLS_CA.md`；2026-11-04 Phase 2 已把 FFmpeg/mpv 播放链路接到同一开关与同一条链，并修复 CRT 时间垃圾导致的全量证书校验失败，devkit 实机通过）。
 - [x] 实现 GET、POST、Cookie、Range、超时和取消所需的 cpr/curl transport。
 - [x] 保留 WBI 参数签名逻辑。
 - [x] 将 cpr 异步接口接入现有线程/回调队列。
@@ -709,7 +709,7 @@ M0–M5 中可以有明确的临时限制，例如只支持匿名 480p、暂不�
 - Desktop/Switch 构建不受影响；
 - MPV 作为优先主线；如果 M5 闸门失败，Xbox360PlayerCore 作为已记录的兜底实现。
 
-## 10. 下一步工作（最近更新 2026-10-11）
+## 10. 下一步工作（最近更新 2026-11-01）
 
 ### 当前状态
 M3 编译和链接、M4 首页网络/API、首次视频播放均已完成实机验证；M7 点播卡顿根因已定位并实机验证修复
@@ -830,6 +830,19 @@ Xbox 360 分支优先使用仓库内副本，`BILI360_DIR` 环境变量仅作为
 M5 及更后续工作，不影响 M3 的离线 UI 验收结论。
 
 ### 已知后续事项
+- **设置页崩溃（2026-11-04 KDNet 定位，既有问题）**：`Intent::openSetting()` 后 UI"冻死"
+  实为 **`Access violation 0xC0000005` 崩溃挂起态**（无调试器时 title 常驻冻结；接 KD 后
+  `g` 即转 ProcessDump 退出）。崩溃点：`gray_convert_glyph_inner`（lunasvg
+  `3rdparty/plutovg/plutovg-ft-raster.c:1394`，SVG 路径光栅化器），`lbzu r6,1(r5)` 以
+  **0x19c** 为基址逐字节走 `outline->tags`；寄存器里是 26.6 坐标值（0x19c/0x3063 = 6.4/193.5），
+  指针槽被坐标数据占据。触发面：设置页 12 个 tab SVG 图标（`resources/svg/setting_*.svg`）。
+  **主机对照（小端 + ASan）渲染仓库全部 SVG × 5 种尺寸零异常** → 非 SVG 内容/通用 bug；
+  嫌疑收敛为（a）BE 特有（fork 的 BE 修复 `90ccb9f` 只覆盖位图通道序，光栅器未覆盖）、
+  （b）console 侧资源文件与仓库不一致/损坏、（c）`plutovg-rle.c` `ft_outline_init` 的
+  realloc 失败路径（失败后仍置 `outline_size`）与 `gray_raster_render` 不校验 `tags`。
+  A/B 对照（同树旧包 `wiliwili_dbg2.xex`）同样崩溃，**与 TLS 改动无关**。待做：
+  console 资源比对、BE 复现/修复、补 `tags` 校验与 realloc 失败处理。受此阻塞：
+  设置页「TLS 验证」开关的 UI 实测暂缓。
 - `std::terminate` 默认 handler 在本平台为空指针（OXDK libcxx_runtime.cpp 的
   `oxdk360_terminate_handler` 初始为 0）；下次 terminate 仍会跳 0。可在启动时
   `set_terminate` 安装 abort handler 改善崩溃诊断。
@@ -876,4 +889,138 @@ XDK 库，基址 `0x82000000`。该记录只覆盖交叉编译和链接，Xenia/
   （24,391,680 B）。`nanovg_d3d/src/nanovg.c.o` 定义 `nvgFontDilate`/`fonsSetDilate`，
   `danmaku_core.cpp.o` 正确引用 `nvgFontDilate`。
 - 两配置均只做交叉编译/链接验证，未上机确认描边观感（实机验收待补）。
+
+#### 2026-10-19 直播弹幕 / 实时互动不更新修复
+
+**症状**：直播画面可以正常播放，但「实时互动」侧边栏没有新弹幕，在线人数 /
+看过人数也不随直播间变化更新。Xbox 360 上尤其明显（devkit 与零售机都可能出现）。
+
+**根因（按影响排序）**：
+
+1. **mongoose socket 没有做 SNL 0x5801 标记**。直播弹幕走 mongoose WebSocket，
+   而 mongoose 自己 `socket()` 创建连接、DNS UDP socket 和 wakeup socketpair。
+   curl（`third_party/curl/lib/connect.c`）和 FFmpeg（`libavformat/tcp.c`）都已
+   在每 socket 上设置 `SOL_SOCKET/0x5801`，mongoose 没有。零售机上未标记的
+   socket 会出现“connect 成功但对端回复被静默丢弃”，表现为完全收不到消息。
+   devkit 的 `XNET_STARTUP_BYPASS_SECURITY` 会掩盖这个问题。
+2. **mongoose 内置 DNS 硬编码 8.8.8.8**。国内网络经常不可达，且它的 UDP
+   socket 同样缺少 0x5801。已改为 Xbox 分支使用 `XNetDnsLookup()`（系统 DNS）。
+3. **`mg_millis()` 回退到 `time(NULL) * 1000`**。主机时钟未同步时可能恒为 0，
+   导致 mongoose 所有定时器（30s 心跳、DNS 超时）不触发。Xbox 分支改用
+   `GetTickCount()`。
+4. **join/心跳包经 `mg_wakeup` + UDP 回环 socketpair 转发**。wakeup 初始化失败
+   时 join 包永远不会发出，服务器不会推送任何消息。两处都改为在 mongoose 线程
+   直接 `mg_ws_send()`（WS_OPEN 回调和定时器本来就在该线程）。
+5. **匿名用户 `std::stoll("")` 抛异常**。未登录时 `getUserID()` 为空，异常被
+   `onDanmakuInfo` 的 catch 吞掉，`danmaku.connect()` 根本不会执行。改为
+   `strtoull` + 空串判断（该 bug 同时影响桌面端）。
+6. **join 包的 `buvid` 用了 `_uuid`**。协议要求的是 `buvid3`；匿名用户
+   `_uuid` 为空。改为从 `getCookie()` 取 `buvid3`（缺失时由 ProgramConfig 生成）。
+7. **`parse_packet` 复用跨包解压缓冲区**：同一 WebSocket 帧里出现多个 zlib 包时
+   会把上一包内容重复解析；同时缺少包头长度/越界检查。已改为每包独立解压并
+   校验 `header_length`/`packet_length`。
+8. **服务器断开后不重连**。直播长连接会被服务端定期关闭；现在 WS close/error
+   后由 mongoose 线程按 5s 退避重连，并轮换 `host_list` 节点。
+9. **`getDanmuInfo` 结果用 `at()` 解析**：任一端口字段缺失会让整个反序列化失败，
+   表现为完全没有弹幕。改为容错 `from_json`（缺失字段取默认值）。
+
+**改动文件**：
+
+- `library/mongoose/mongoose.c`（子模块）：Xbox SNL 0x5801、XNet DNS、
+  `GetTickCount` 计时、socketpair/accept/listen 标记。
+- `wiliwili/source/api/danmaku_live.cpp`：直接发送 join/心跳、重连、host 轮换、
+  buvid3、日志。
+- `wiliwili/include/api/live/danmaku_live.hpp`：重连状态与 `open_connection()`。
+- `wiliwili/source/api/util/ws_utils.cpp`：解压缓冲区隔离与越界保护。
+- `wiliwili/include/api/bilibili/result/live_danmaku_result.h`：容错解析。
+- `wiliwili/source/activity/live_player_activity.cpp`：匿名 uid 解析。
+
+**验证**：Xenon clang 全量编译 + 链接通过（`build-xbox360-local/wiliwili`，
+28,917,760 B，162 objects + 13 XDK 库，md5 `47b190f42f1e0f5f10e9bbf53d281008`）；
+实机验收（devkit/零售机各一次，观察 `(LiveDanmaku) WebSocket connected`、
+侧边栏弹幕和在线人数更新）待补。注意 mongoose 是 git 子模块，本次修改位于
+`library/mongoose` 工作树，提交时需同步子模块指针。
+
+#### 2026-10-26 HTTPS 证书校验恢复：内嵌 CA bundle（Phase 1）
+
+**症状**：Xbox 360 分支自 M4 起强制 `BILI::setTlsVerify(false)`，所有 API、图片、
+登录流量都不校验证书，只有加密没有身份认证。
+
+**根因**：不是 mbedTLS 能力缺失，而是没有信任链来源——
+`config-xbox360.h` 关闭 `MBEDTLS_FS_IO`，curl 后端只在 `CURLOPT_CAINFO` 存在时才挂
+CA 链，FFmpeg 侧在无 `MBEDTLS_FS_IO` 时把 authmode 写死 `VERIFY_NONE`。零售机是单
+XEX，无法依赖 `game:\resources\` 的散文件。
+
+**方案**（详见 `docs/XBOX360_TLS_CA.md`）：
+
+- `third_party/ca/cacert.pem` 固定 Mozilla bundle（118 张根，SHA256
+  `796F1389…3CBE`），`scripts/gen_xbox360_ca_bundle.py` 在构建期校验 SHA256 并生成
+  NUL 结尾的 C 数组；
+- `wiliwili/source/platform/xbox360/xbox360_ca.c` 在 `x360_mbedtls_pool_init()` 之后
+  解析一次，形成进程级 `mbedtls_x509_crt` 链（永不释放，curl/FFmpeg 共用）；
+- 两个源文件进 `MAIN_SRC`（不能进静态库：`oxdklink` 单遍扫描且无 `--start-group`）；
+- `third_party/curl/lib/vtls/mbedtls.c`：`verifypeer` 且未设 CAFILE 时挂全局链，
+  链缺失则 `CURLE_SSL_CACERT_BADFILE`（fail-closed）；
+- `config_helper.cpp` 去掉强制关闭，改读 `TLS_VERIFY`（默认 1）；系统时钟早于
+  2024-01-01 时告警并本次会话降级；`game:\config\wiliwili\cacert.pem` 可追加覆盖。
+
+**验证**：Xenon 全量编译 + 链接通过（164 objects + 13 XDK 库，
+29,114,368 B，镜像 `0x1bc0000`，+192 KB）；`llvm-nm` 确认 curl 引用
+`x360_ca_chain` 且 bundle 符号为 0x30DB5 = 200,117 B；118 个 PEM 块全部可解码。
+实机验收（首页/图片/登录/负向/时钟/devkit+零售）待补。
+
+**未覆盖**：FFmpeg `tls_mbedtls.c` 仍为 `VERIFY_NONE`，视频流不校验；直播弹幕走
+明文 `ws://`，不在范围内。Phase 2 处理播放链路。
+
+#### 2026-11-01 动态页 JSON 类型不匹配崩溃（KDNet 定位）
+
+**症状**：打开「动态」页后整机卡死，XBDM/xbcapture 全部连不上；屏幕停在最后一帧。
+
+**KDNet 定位**（`Bugcheck 0x00000000`，`kd>` 停止）：
+
+```
+nlohmann::detail::get_arithmetic_value<..., unsigned long long>
+  -> abort() -> doexit() -> nt bugcheck
+调用者：bilibili::from_json(..., bilibili::DynamicUpResult&)
+```
+
+- 动态页请求 `/x/polymer/web-dynamic/v1/uplist`，返回项的 `mid` 不是 JSON 数字
+  （字符串或 null）；
+- `DynamicUpResult::mid` 是 `uint64_t`，`NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE` 走严格
+  `get<uint64_t>()`；
+- 本移植 C++ 编译带 `-fno-exceptions`（`toolchain.cmake:222`），`parseJson` 在 Xbox
+  分支也没有 try/catch，异常直接 `abort()` → kernel bugcheck，调试器把控制台停住。
+
+**与播放线程改动无关**：崩溃时 `MPVCore` 尚未初始化（无 `[x360-play]` 日志）。
+
+**修复**：`result/dynamic_video.h` 的 `DynamicUpResult` 改为容错 `from_json`：
+`mid` 接受无符号/有符号数字、十进制字符串、缺失/null（回退 0），其余字段缺失也取默认值。
+**注意**该构建不记录头文件依赖（`#deps 0`），仅改头文件不会重编，需 touch 相关
+`.cpp`（`dynamic_api.cpp` / `dynamic_video.cpp` / `dynamic_tab.cpp`）或 clean 重建。
+
+**验证**：devkit 192.168.2.9，`RUNTIME_PROBES=1` 构建；动态页 uplist + feed 正常加载，
+60fps，无 bugcheck。**遗留风险**：其他结果结构仍有严格的 `get<uint64_t>()` 字段，
+服务端改变类型时同样会 abort；后续应引入非抛异常的安全取值 helper 或统一审计。
+
+#### 2026-11-04 TLS Phase 2（FFmpeg 播放链路挂链+校验）与 CRT 时钟 bug
+
+**症状**：Phase 2 首次实机验收时开启校验后所有握手 `-0x2700`
+（`X509 CERT_VERIFY_FAILED`），首页「WBI签名获取失败」。
+
+**根因（平台级，独立于 TLS）**：XDK CRT `time()/_time64()` 真机返回
+`unix_seconds << 32`（cbffmpeg `compat/xbox360/posix_time.c` 头注早有记录）。
+mbedTLS 有效期校验用的就是它 → 证书全部"过期"；`x360_tls_clock_ok()` 也读它
+→ 时钟降级兜底失效。修复：`xbox360_ca.c` 提供 `KeQuerySystemTime` 版
+`x360_unix_seconds()`，`config-xbox360.h` 开 `MBEDTLS_PLATFORM_TIME_ALT` 并在
+`x360_ca_init()` 装 `mbedtls_platform_set_time()` 钩子（curl/FFmpeg 共用），
+`x360_tls_clock_ok()` 一并修正。详见 `XBOX360_TLS_CA.md` §7。
+
+**Phase 2 本体**：`x360_tls_verify()` 成为进程级单一开关（设置项+时钟降级后），
+`libavformat/tls_mbedtls.c` `_XBOX` 分支挂 `x360_ca_chain()` 并按开关选
+`VERIFY_REQUIRED/NONE`，链缺失 fail-closed；mpv `tls-verify` 镜像同一决策；
+`cbffmpeg/ffmpeg-4.4.8` 同源副本已同步。devkit 实机：首页/图片墙/登录态 API/
+1080p 视频播放（`Playing: https://upos-…m4s`）全部经验证 TLS 通过，负向由旧包
+（未修时钟）同配置全量握手失败对照证明。遗留：零售机复验、二维码登录页与
+设置页开关 UI 实测（后者被既有设置页冻结阻塞，见"已知后续事项"）。
+
 

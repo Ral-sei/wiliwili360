@@ -26,7 +26,7 @@
 | O5 | 探针自身开销（`probeHeap` 64MB 试探 / 纹理缓存列表双遍历） | 极低 | ✅ 已完成 |
 | O6 | 三平面三把锁 → 一次 GPU cache 失效批量 | 中 | ⏸ 评估后暂不实施（§2 O6） |
 | O7 | NanoVG D3D9 flush 冗余 render/sampler 状态去重 | 中 | ⏸ 评估后暂不实施（§2 O7） |
-| O8 | 参数调优（`vd-lavc-threads`、`INMEMORY_CACHE`、`video-params` 轮询） | 低（需实机 A/B） | ⬜ 待办 |
+| O8 | 参数调优（`vd-lavc-threads`、`INMEMORY_CACHE`、`video-params` 轮询） | 低（需实机 A/B） | 🔄 `vd_threads`/`spread` 均可运行时覆盖；6/5/4 线程实机 A/B 已完成，绑核对照待测 |
 | O9 | NanoVG UI 纹理上传（create/update）改用 `XMemCpyStreaming_WriteCombined`，RGBA 字节交换移出 WC 显存 | 低 | ✅ 已完成（实机待验） |
 | O10 | XAV 硬件解码路径（XDK 公开 API，YouTube 同款引擎）接入 `HARDWARE_DEC` 开关 | 高（工具链阻塞） | ⏸ 代码就位，`-DXBOX360_XAV=ON` 才编译；默认 OFF（见 §2 O10） |
 | P1 | `Xbox360Mutex` 自旋让步预算 4096 → 64（上下文切换 / critical-section 阻塞） | 低 | ✅ 已完成 |
@@ -158,7 +158,64 @@
 - `mpv_core.cpp` `vd-lavc-threads=6` vs 4（cbffmpeg P2 基线 4 线程 spread 最优）。
 - `config_helper.cpp` `INMEMORY_CACHE` 上限 `{0,1,5,10}MB`（性能计划 §15.7 慢 CDN 候选：提高上限吸收滴流）。
 - `mpv_core.cpp` 每 250ms 主线程同步 `getInt("video-params/w")` → 改 `mpv_observe_property`。
-- **状态**：⬜
+- **2026-11-01 实施（解码线程运行时可配）**：`MPVCore::init()` 的 Xbox 分支默认仍为
+  `vd-lavc-threads=6`，但启动时会读取 `game:\x360_play.cfg` 的 `vd_threads=N`（1–16）覆盖，
+  并在日志打印 `[x360-play] vd-lavc-threads=N`。目的是**不重编 XEX** 就能做线程数 A/B；
+  文件不存在时行为与历史构建完全一致。
+  - 依据：cbffmpeg P2 纯 C 基线 1080p 最优 3t（14.14fps）、720p 最优 4t（25.35fps），
+    6t 因 spread 表 `{2,4,1,3}` 回填而回落；但那是独立解码 harness 的数字，完整播放器里
+    mpv 还有 demux/audio/vo 线程、主线程还要做 UI+render+上传，最优点需实测。
+  - H.264 无需显式 `thread_type`：libavcodec 默认 slice|frame，`validate_thread_parameters()`
+    优先 `FF_THREAD_FRAME`（`ffmpeg-4.4.8/libavcodec/pthread.c:48-58`）。
+  - A/B 步骤：用 `RUNTIME_PROBES=1 bash scripts/build_xbox360_local.sh` 编测量版
+    （`[x360-perf]`/`[x360-mpv]` 默认关闭；所有变体必须用同一份构建）；
+    同一段内容（建议 720p30 与 1080p30 各一段）→ 分别放
+    `vd_threads=3/4/5/6` → 采集 `[x360-perf] frame`（视频/UI fps、sync、build）、
+    `[x360-mpv]`（est-vf、decoder/vo 丢帧、cache）、`[x360-sw]`（scale ms）。
+    判据：视频 fps 不降的前提下 UI p95 与 vo 丢帧最小者胜；同时记录 `setFrameSize`
+    是否因线程抖动触发。
+  - **2026-11-01 实机 A/B（1080p30 点播，`RUNTIME_PROBES=1`）**：
+
+    | 指标 | 6 线程 | 5 线程 | 4 线程 |
+    |---|---|---|---|
+    | decoder 丢帧 | 0 | 0 | 0 |
+    | est-vf | 30.00 | 30.00 | 30.00 |
+    | VO 丢帧 | ~12/s | ~10–11/s | ~14/s |
+    | UI fps | 16–22 | 15–26 | 12–13 |
+    | build p50 | 27–36ms | 19–26ms | 46–48ms |
+    | build p95 | 137–164ms | 148–178ms | 169–255ms |
+
+    三组都走 `src 1920x1080 -> dst 1920x1080` 的 1:1 copy（scale 3.3–3.5ms），
+    upload ~4.6ms。**解码始终跟得上，瓶颈是主线程 UI build 被解码线程抢占**；
+    减线程只让每帧解码拉长，4 线程反而更差。
+    注意：三次播放的是不同段落，弹幕密度/场景不同，`build` 绝对值有混杂；
+    后续 A/B 应固定段落并先做关弹幕对照。
+  - **2026-11-01 绑核运行时可配**：cbffmpeg `compat/xbox360/pthread.c` 新增
+    `xbox360_pthread_set_spread_cpus()`；`MPVCore::init()` 读取
+    `game:\x360_play.cfg` 的 `spread=a,b,c,d` 后覆盖轮转表（默认 `{2,4,1,3}`）。
+    用于验证"把 worker 限制在核 1/2（`{2,4,3,5}`），核 0 留给主线程"。
+    compat 归档用 `cbffmpeg/scripts/mpv_x360_compat_archive.sh` 增量重建。
+  - **2026-11-01 音频设备缓冲**：`cbffmpeg/mpv-0.36.0/audio/out/ao_xaudio2.c`
+    的设备缓冲原为固定 4096 帧（44.1kHz ≈ 93ms）；1080p 解码占满核时 AO 线程
+    被延迟 >93ms 即 `Audio device underrun`，每次欠载重置音频时钟并触发
+    `Audio/Video desynchronisation`。改为 `max(4096, --audio-buffer × samplerate)`
+    （默认 0.2s ≈ 200ms）。实测同一 1080p 场次欠载从 45 次/3min 降到启动时 1 次。
+    `libmpv.a` 用 `build/waf-2.0.25` 重建（注意 `X360_CLANG=/root/oxdk-llvm/build/bin/clang`）。
+  - **2026-11-01 avsync 探针与 vsync 实验**：`[x360-mpv]` 增加
+    `avsync/vpts/apts`。OSD 隐藏、弹幕关时 build 0.4–7ms、UI 44–52fps，但
+    `avsync` 仍 ~0.18 s/s 增长，`drops: vo ~13/s`、decoder 0 → 视频只按约
+    20fps 前进。把 D3D9 present 从 `INTERVAL_ONE` 改为 `IMMEDIATE` 后
+    present 15.8→0.08ms，但 UI build 涨到 30–40ms、avsync 增速升到 ~0.28 s/s：
+    **vsync 阻塞实际在给解码线程让 CPU**，瓶颈是 CPU 争用而非 present 等待。
+    已回退为 `INTERVAL_ONE`；后续方向 = VMX128（见
+    `XBOX360_P6_VMX128_PLAN.md`）。
+  - **2026-11-01 点播 720P 硬钳制**：`player_base_activity.cpp` 的
+    `if (code > 64) code = 64;` 原本对 `__PSV__ || PLATFORM_XBOX360` 生效，
+    现只对 PSV 生效；Xbox 默认清晰度仍为 720P（`WILI_VIDEO_QUALITY_DEFAULT=64`），
+    上限 `WILI_VIDEO_QUALITY_*_MAX` 改为 128。仅用于 1080P A/B 的手动选择。
+  - **状态**：Xenon 编译 + 链接通过（2026-11-01，`build-xbox360-local`，
+    29,179,904 B，164 objects + 13 XDK 库，镜像 `0x1bd0000`，无新增告警）；
+    6/5/4 线程实机数据已采集；`spread={2,4,3,5}` 对照组待测。
 
 ### O9 — NanoVG UI 纹理上传改用 `XMemCpyStreaming_WriteCombined`
 
@@ -236,6 +293,7 @@
 | 2026-10-16 | O9 | NanoVG 纹理 create/update 改 `XMemCpyStreaming_WriteCombined`；`renderUpdateTexture` RGBA 字节交换移出 WC 显存 | `nanovg_d3d9_backend.cpp.o` 强制重编 + 全量链接通过（XEX 24,391,680B）；nm 确认符号解析 |
 | 2026-10-16 | O10 | XAV 硬件解码路径接入 `HARDWARE_DEC`（默认 `X360_XAV=OFF`）；XAV 入口按 MSVC 修饰名 `asm()` 绑定 | `-DX360_XAV=1` 单 TU 编译通过；默认 OFF 全量链接通过（XEX 24,391,680B，9 个 XDK 库）。**链接阻塞：xav.lib 定义成员 COFF 无法翻译**（见 §2 O10） |
 | 2026-10-16 | — | 发现构建系统不记录头文件依赖（`#deps 0`），纯头文件改动不触发重编 | 见 §6.6；需 clean 重建规避 |
+| 2026-11-01 | O8 | `vd-lavc-threads` 与轮转绑核表均支持 `game:\x360_play.cfg` 运行时覆盖（`vd_threads=N` / `spread=a,b,c,d`），日志 `[x360-play]` | Xenon 编译+链接通过（29,179,904 B）；1080p30 下 6/5/4 线程实机 A/B 完成，结果见 §2 O8 |
 
 ---
 
