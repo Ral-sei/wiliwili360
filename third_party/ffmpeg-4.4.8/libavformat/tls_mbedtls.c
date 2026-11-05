@@ -35,6 +35,16 @@
 #include "tls.h"
 #include "libavutil/parseutils.h"
 
+#ifdef _XBOX
+/* wiliwili/source/platform/xbox360/xbox360_ca.c: the process-wide trust store
+   parsed from the CA bundle embedded in the XEX (docs/XBOX360_TLS_CA.md), and
+   the effective verification switch (SettingItem::TLS_VERIFY after the console
+   clock downgrade).  Both are shared with the curl transport, so the playback
+   chain and the API chain follow one decision. */
+extern const void *x360_ca_chain(void);
+extern int x360_tls_verify(void);
+#endif
+
 typedef struct TLSContext {
     const AVClass *class;
     TLSShared tls_shared;
@@ -172,6 +182,18 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     TLSShared *shr = &tls_ctx->tls_shared;
     uint32_t verify_res_flags;
     int ret;
+#ifdef _XBOX
+    /* wiliwili's "TLS verify" setting is the single switch for the whole
+       process.  shr->verify (mpv --tls-verify) is deliberately ignored here:
+       it mirrors the same setting but cannot carry the console-clock
+       downgrade, and the settings-page escape hatch must win in every case. */
+    int verify_peer = x360_tls_verify();
+#else
+    int verify_peer = shr->verify;
+#if defined(MBEDTLS_FS_IO)
+    verify_peer = verify_peer && shr->ca_file;
+#endif
+#endif
 
     // parse additional options
     parse_options(tls_ctx, uri);
@@ -263,14 +285,35 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         goto fail;
     }
 
+#ifdef _XBOX
+    {
+        /* Phase 2 (docs/XBOX360_TLS_CA.md): verify against the bundle embedded
+           in the XEX.  The chain is parsed once and never freed, so sharing it
+           with curl across all connections is safe.  Fail closed when
+           verification is on but no trust store could be built. */
+        const mbedtls_x509_crt *ca_chain = (const mbedtls_x509_crt *)x360_ca_chain();
+        if (verify_peer && ca_chain == NULL) {
+            av_log(h, AV_LOG_ERROR,
+                   "TLS verification requested but no CA trust store is available\n");
+            goto fail;
+        }
+        mbedtls_ssl_conf_authmode(&tls_ctx->ssl_config,
+                                  verify_peer ? MBEDTLS_SSL_VERIFY_REQUIRED
+                                              : MBEDTLS_SSL_VERIFY_NONE);
+        if (ca_chain != NULL)
+            mbedtls_ssl_conf_ca_chain(&tls_ctx->ssl_config,
+                                      (mbedtls_x509_crt *)ca_chain, NULL);
+    }
+#else
     mbedtls_ssl_conf_authmode(&tls_ctx->ssl_config,
 #if defined(MBEDTLS_FS_IO)
                               shr->ca_file ? MBEDTLS_SSL_VERIFY_REQUIRED : MBEDTLS_SSL_VERIFY_NONE);
 #else
                               MBEDTLS_SSL_VERIFY_NONE);
 #endif
-    mbedtls_ssl_conf_rng(&tls_ctx->ssl_config, mbedtls_ctr_drbg_random, &tls_ctx->ctr_drbg_context);
     mbedtls_ssl_conf_ca_chain(&tls_ctx->ssl_config, &tls_ctx->ca_cert, NULL);
+#endif
+    mbedtls_ssl_conf_rng(&tls_ctx->ssl_config, mbedtls_ctr_drbg_random, &tls_ctx->ctr_drbg_context);
 
     // set own certificate and private key
     if ((ret = mbedtls_ssl_conf_own_cert(&tls_ctx->ssl_config, &tls_ctx->own_cert, &tls_ctx->priv_key)) != 0) {
@@ -309,11 +352,7 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     }
 #endif
 
-    if (shr->verify
-#if defined(MBEDTLS_FS_IO)
-        && shr->ca_file
-#endif
-    ) {
+    if (verify_peer) {
         // check the result of the certificate verification
         if ((verify_res_flags = mbedtls_ssl_get_verify_result(&tls_ctx->ssl_context)) != 0) {
             av_log(h, AV_LOG_ERROR, "mbedtls_ssl_get_verify_result reported problems "\

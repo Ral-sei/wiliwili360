@@ -351,6 +351,30 @@ if (PLATFORM_XBOX360)
         ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/activity/dlna_activity.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/api/dlna.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/fragment/player_dlna_search.cpp)
+
+    # ---- embedded CA trust store ------------------------------------------
+    # A retail Xbox 360 title is a single XEX, so the Mozilla root bundle is
+    # compiled into the binary instead of being deployed as a loose file.
+    # Both sources must be objects of the executable, not members of a static
+    # archive: APP_PLATFORM_LIB ends with "mbedtls, curl" and oxdklink scans
+    # archives once (no --start-group), so a chain defined in an earlier
+    # archive would be invisible to curl and a chain defined in a later one
+    # could not reach mbedtls.
+    set(XBOX360_CA_SHA256
+        "796F1389BFEA13C0ED78F663B765BAAFF54A508E5483786BD6ECE73C5E3E3CBE")
+    set(XBOX360_CA_PEM "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ca/cacert.pem")
+    set(XBOX360_CA_GENERATOR "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_xbox360_ca_bundle.py")
+    set(XBOX360_CA_GENERATED "${CMAKE_BINARY_DIR}/xbox360_ca_bundle.c")
+    add_custom_command(
+        OUTPUT "${XBOX360_CA_GENERATED}"
+        COMMAND python3 "${XBOX360_CA_GENERATOR}" "${XBOX360_CA_PEM}"
+                "${XBOX360_CA_GENERATED}" "${XBOX360_CA_SHA256}"
+        DEPENDS "${XBOX360_CA_PEM}" "${XBOX360_CA_GENERATOR}"
+        COMMENT "Generating embedded Xbox 360 CA bundle"
+        VERBATIM)
+    list(APPEND MAIN_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/wiliwili/source/platform/xbox360/xbox360_ca.c
+        "${XBOX360_CA_GENERATED}")
 endif ()
 if (WIN32)
     configure_file("${CMAKE_SOURCE_DIR}/wiliwili/app_win32.rc.in" "${CMAKE_BINARY_DIR}/app_win32.rc")

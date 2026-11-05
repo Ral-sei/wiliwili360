@@ -85,6 +85,10 @@ static unsigned long long xbox_thread_cpu_100ns(void)
 #endif
 
 #ifdef _XBOX
+/* Embedded Mozilla root bundle (wiliwili/source/platform/xbox360/xbox360_ca.c).
+   Returns a const mbedtls_x509_crt* or NULL when the bundle failed to load. */
+extern const void *x360_ca_chain(void);
+
 static int mbedtls_x509_crt_parse_xbox_file(
   mbedtls_x509_crt *chain,
   const char *path)
@@ -569,6 +573,22 @@ mbedtls_connect_step1(struct connectdata *conn, int sockindex)
       }
     }
     mbedtls_ssl_conf_ca_chain(&connssl->config, &connssl->cacert, NULL);
+  }
+#endif
+
+#ifdef _XBOX
+  /* No CURLOPT_CAINFO was supplied: use the bundle compiled into the XEX.
+     This is the normal path for wiliwili; the file loader above stays as an
+     override for debugging. */
+  if(data->set.ssl.verifypeer && !data->set.str[STRING_SSL_CAFILE]) {
+    const void *chain = x360_ca_chain();
+    if(!chain) {
+      failf(data, "mbedTLS: no CA trust store available");
+      mbedtls_free_connection(connssl);
+      return CURLE_SSL_CACERT_BADFILE;
+    }
+    mbedtls_ssl_conf_ca_chain(&connssl->config,
+                               (mbedtls_x509_crt *) chain, NULL);
   }
 #endif
 

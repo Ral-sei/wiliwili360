@@ -30,6 +30,7 @@
 #include "utils/vibration_helper.hpp"
 #if defined(PLATFORM_XBOX360)
 #include "platform/xbox360/xbox360_network_runtime.hpp"
+#include "platform/xbox360/xbox360_ca.h"
 // #11（§5.8-3）：mbedtls 私有分配池，定义于 third_party/mbedtls/library/platform.c
 extern "C" void x360_mbedtls_pool_init();
 #endif
@@ -1058,6 +1059,16 @@ void ProgramConfig::init() {
     // 让 ECDH 的微小 MPI 分配不再在 CRT 全局堆锁上排队（实测慢 calloc p50=20ms、
     // max=60ms，21.6s 握手里 63s 耗在 68 字节分配上）。
     x360_mbedtls_pool_init();
+    // Parse the embedded Mozilla root bundle once, on the private mbedTLS pool.
+    // curl and FFmpeg both reuse this chain for every later HTTPS connection.
+    {
+        x360_ca_stats ca{};
+        if (x360_ca_init(&ca) != 0)
+            brls::Logger::error("[x360-tls] CA bundle unavailable; HTTPS will fail");
+        else
+            brls::Logger::info("[x360-tls] ca={} skipped={} parse={}ms clock={}", ca.certs, ca.skipped,
+                               ca.parseMs, ca.unixTime);
+    }
     curl_global_init(CURL_GLOBAL_DEFAULT);
     cpr::async::startup(THREAD_POOL_MIN_THREAD_NUM, THREAD_POOL_MAX_THREAD_NUM, 0);
 #endif
@@ -1142,10 +1153,23 @@ void ProgramConfig::init() {
         });
     BILI::setProxy(httpProxy, httpsProxy);
 #if defined(PLATFORM_XBOX360)
-    // The initial Xbox image has no deployed CA bundle.  Keep HTTPS usable
-    // until the bundle is packaged; mbedTLS still authenticates the channel
-    // when a CA store is supplied by a later resource update.
-    BILI::setTlsVerify(false);
+    // The root bundle is embedded in the XEX (third_party/ca/cacert.pem), so
+    // certificate, hostname and expiry verification stay on by default.
+    // A console whose clock was never synced cannot validate any chain; fall
+    // back for this session rather than leaving the app unusable, and say so.
+    {
+        bool tlsVerify = getBoolOption(SettingItem::TLS_VERIFY);
+        if (tlsVerify && !x360_tls_clock_ok()) {
+            brls::Logger::warning(
+                "[x360-tls] console clock predates 2024; TLS verification disabled for this session");
+            tlsVerify = false;
+        }
+        BILI::setTlsVerify(tlsVerify);
+        // FFmpeg/mpv reads the same switch per connection (tls_mbedtls.c,
+        // docs/XBOX360_TLS_CA.md Phase 2); one effective decision for both
+        // transports so the settings toggle can never leave them disagreeing.
+        x360_tls_set_verify(tlsVerify ? 1 : 0);
+    }
 #else
     BILI::setTlsVerify(getBoolOption(SettingItem::TLS_VERIFY));
 #endif
@@ -1310,6 +1334,17 @@ void ProgramConfig::setProxy(const std::string& proxy) {
 }
 
 void ProgramConfig::setTlsVerify(bool verify) {
+#if defined(PLATFORM_XBOX360)
+    // Same console-clock guard as init(): a clock that has never synced cannot
+    // validate any chain, so the session downgrade sticks even when the user
+    // re-enables verification from the settings page.
+    if (verify && !x360_tls_clock_ok()) {
+        brls::Logger::warning(
+            "[x360-tls] console clock predates 2024; TLS verification stays disabled");
+        verify = false;
+    }
+    x360_tls_set_verify(verify ? 1 : 0);
+#endif
     BILI::setTlsVerify(verify);
 }
 

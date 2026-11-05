@@ -15,6 +15,12 @@
 #define MBEDTLS_HAVE_TIME
 #define MBEDTLS_HAVE_TIME_DATE
 #define MBEDTLS_PLATFORM_GMTIME_R_ALT
+/* The XDK CRT's time()/_time64() returns garbage on hardware (observed as
+ * <unix_seconds> << 32; see cbffmpeg compat/xbox360/posix_time.c), so the
+ * default mbedtls_time would fail every certificate validity check. Route it
+ * through mbedtls_platform_set_time(); x360_ca_init() installs a
+ * KeQuerySystemTime-based implementation before any TLS connection. */
+#define MBEDTLS_PLATFORM_TIME_ALT
 /* NO MBEDTLS_HAVE_ASM - XDK compiler is MSVC-based, not GCC */
 
 /* ----------------------------------------------------------------
