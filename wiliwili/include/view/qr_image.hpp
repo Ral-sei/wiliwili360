@@ -1,22 +1,24 @@
 //
-// Created by fang on 2022/6/4.
+// Created by fang on 2022/8/22.
 //
 
 #pragma once
 
-#include <cpr/cpr.h>
 #include <qrcodegen.hpp>
-#include <pystring.h>
-#include <cstdlib>
-#include <sstream>
-#include <fmt/format.h>
+#include <cstdint>
+#include <climits>
+#include <vector>
 
 #include "view/svg_image.hpp"
 
 using qrcodegen::QrCode;
-using qrcodegen::QrSegment;
-using namespace lunasvg;
 
+// QR codes are grids of filled squares.  They used to be rasterised through
+// lunasvg as one giant SVG path (one "M..h1v1h-1z" sub-path per module), but
+// plutovg's smooth rasteriser hangs or faults on that shape on the Xbox 360
+// (settings page froze; KD showed gray_convert_glyph_inner walking garbage --
+// see docs/XBOX360_PORTING_PLAN.md "设置页崩溃").  Drawing the modules straight
+// into a bitmap is both faster and immune to that rasteriser.
 class QRImage : public SVGImage {
 public:
     QRImage() {
@@ -50,53 +52,59 @@ public:
         this->updateQR();
     }
 
-    static inline std::string getColor(NVGcolor color) {
-        unsigned char r, g, b;
-        r = color.r * 255;
-        g = color.g * 255;
-        b = color.b * 255;
-        return fmt::format("{:02X}{:02X}{:02X}", r, g, b);
-    }
-
-    void updateQR() { this->setImageFromSVGString(this->toSvgString()); }
-
-    [[nodiscard]] std::string toSvgString() const {
-        int size   = qr.getSize();
-        int border = this->QRBorder;
+    void updateQR() {
+        const int size   = qr.getSize();
+        const int border = this->QRBorder;
         // Xbox 360 builds disable C++ exceptions; reject invalid values without throwing.
-        if (border < 0 || border > INT_MAX / 2 || border * 2 > INT_MAX - size) return {};
+        if (size <= 0 || border < 0 || border > INT_MAX / 2 || border * 2 > INT_MAX - size) return;
 
-        std::ostringstream sb;
-        sb << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-        sb << "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" "
-              "\"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n";
-        sb << "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" "
-              "viewBox=\"0 0 ";
-        sb << (size + border * 2) << " " << (size + border * 2) << "\" stroke=\"none\">\n";
-        sb << "\t<rect width=\"100%\" height=\"100%\" fill=\"#";
-        sb << getColor(this->backgroundColor);
-        sb << "\"/>\n";
-        sb << "\t<path d=\"";
-        for (int y = 0; y < size; y++) {
-            for (int x = 0; x < size; x++) {
-                if (qr.getModule(x, y)) {
-                    if (x != 0 || y != 0) sb << " ";
-                    sb << "M" << (x + border) << "," << (y + border) << "h1v1h-1z";
-                }
+        // Draw every module as a scale x scale block so the texture stays
+        // crisp when the view scales it up (37 modules -> 296 px at 8x).
+        const int scale   = 8;
+        const int modules = size + border * 2;
+        // The guard above only bounds size + 2*border; the 8x upscale and the
+        // RGBA allocation still have to fit in int / size_t.  The RGBA buffer
+        // is px*px*4 bytes, so on a 32-bit build px must stay below 32768.
+        if (modules > INT_MAX / scale) return;
+        const int px = modules * scale;
+        if (px <= 0 || (size_t)px > SIZE_MAX / 4u / (size_t)px) return;
+
+        const unsigned char br = toByte(this->backgroundColor.r), bg = toByte(this->backgroundColor.g),
+                            bb = toByte(this->backgroundColor.b), ba = toByte(this->backgroundColor.a);
+        const unsigned char mr = toByte(this->mainColor.r), mg = toByte(this->mainColor.g),
+                            mb = toByte(this->mainColor.b), ma = toByte(this->mainColor.a);
+
+        std::vector<unsigned char> rgba((size_t)px * (size_t)px * 4u);
+        for (int y = 0; y < px; y++) {
+            unsigned char* row = rgba.data() + (size_t)y * (size_t)px * 4u;
+            for (int x = 0; x < px; x++) {
+                const int mx = x / scale - border;
+                const int my = y / scale - border;
+                const bool on = mx >= 0 && my >= 0 && mx < size && my < size && qr.getModule(mx, my);
+                row[x * 4 + 0] = on ? mr : br;
+                row[x * 4 + 1] = on ? mg : bg;
+                row[x * 4 + 2] = on ? mb : bb;
+                row[x * 4 + 3] = on ? ma : ba;
             }
         }
-        sb << "\" fill=\"#";
-        sb << getColor(this->mainColor);
-        sb << "\"/>\n";
-        sb << "</svg>\n";
-        return sb.str();
+
+        NVGcontext* vg = brls::Application::getNVGContext();
+        int tex        = nvgCreateImageRGBA(vg, px, px, 0, rgba.data());
+        if (tex <= 0) return;
+        this->innerSetImage(tex);
     }
 
     static View* create() { return new QRImage(); }
 
 private:
-    QrCode qr                = QrCode::encodeText("", QrCode::Ecc::LOW);
+    static unsigned char toByte(float v) {
+        if (v <= 0.f) return 0;
+        if (v >= 1.f) return 255;
+        return (unsigned char)(v * 255.0f + 0.5f);
+    }
+
+    QrCode qr      = QrCode::encodeText("", QrCode::Ecc::LOW);
     NVGcolor mainColor       = nvgRGB(0, 0, 0);
-    NVGcolor backgroundColor = nvgRGB(255, 255, 255);
-    int QRBorder             = 1;
+    NVGcolor backgroundColor = nvgRGB(0xFF, 0xFF, 0xFF);
+    int QRBorder             = 2;
 };

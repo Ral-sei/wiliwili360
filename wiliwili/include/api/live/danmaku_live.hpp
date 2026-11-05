@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <atomic>
 #include <thread>
@@ -70,12 +71,25 @@ public:
     std::atomic<bool> connected{false};
     std::atomic<bool> ms_ev_ok{false};
     size_t wait_time = 100;
+    // 供 mongoose_event_handler（自由函数）访问
+    std::atomic<bool> reconnectNeeded{false};
+    bool heartbeatTimerAdded = false;
 
 private:
+    // Build the WebSocket URL and start a connection.  Must run on the
+    // mongoose thread (or before it starts).
+    void open_connection();
+
     std::thread mongoose_thread;
     std::thread task_thread;
     MessageCallback onMessage = nullptr;
     MessageQueue msg_queue;
-    
+    uint64_t lastReconnectMs = 0;
+    size_t hostIndex = 0;
+    // buvid3 snapshot resolved in connect() on the caller's thread.  See the
+    // comment there: getCookie() mutates the shared cookie map and must not be
+    // called from the mongoose thread.
+    std::string buvid;
+
     friend void add_message(LiveDanmaku* live, std::string&& msg);
 };

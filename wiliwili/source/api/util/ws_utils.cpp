@@ -23,14 +23,6 @@ std::vector<std::string> parse_packet(const std::vector<uint8_t>& data) {
     std::vector<std::string> messages;
     messages.reserve(128);
 
-    std::vector<uint8_t> decompressed;
-    decompressed.reserve(1024 * 256);
-
-    z_stream strm;
-    strm.zalloc = Z_NULL;
-    strm.zfree  = Z_NULL;
-    strm.opaque = Z_NULL;
-
     size_t data_len = data.size();
     size_t offset   = 0;
 
@@ -39,7 +31,8 @@ std::vector<std::string> parse_packet(const std::vector<uint8_t>& data) {
     uint16_t protocol_version;
     uint32_t operation;
 
-    while (offset < data_len) {
+    // 至少要有完整的 16 字节协议头
+    while (offset + 16 <= data_len) {
         std::memcpy(&packet_length, data.data() + offset, sizeof(uint32_t));
         std::memcpy(&header_length, data.data() + offset + 4, sizeof(uint16_t));
         std::memcpy(&protocol_version, data.data() + offset + 6, sizeof(uint16_t));
@@ -50,45 +43,52 @@ std::vector<std::string> parse_packet(const std::vector<uint8_t>& data) {
         protocol_version = ntohs(protocol_version);
         operation        = ntohl(operation);
 
-        offset += header_length;
+        // 丢弃截断/畸形包，避免越界读取
+        if (header_length < 16 || packet_length < header_length ||
+            packet_length > data_len - offset) {
+            break;
+        }
 
-        //| 3 | 服务器 | 数据类型为Int 32 Big Endian | 心跳回应 | Body 内容为房间人气值 |
-        // if (operation == 3){
-        //     uint32_t body = ntohl(*reinterpret_cast<const uint32_t*>(data.data() + offset));
-        //     messages.emplace_back("heartbeat reply: " + std::to_string(body));
-        //     break;
-        // }
+        const uint8_t* body = data.data() + offset + header_length;
+        size_t body_len     = packet_length - header_length;
+
         //| 5 | 服务器 | 数据类型为JSON纯文本 | 通知 | 弹幕、广播等全部信息 |
         if (operation == 5) {
-            std::string body(reinterpret_cast<const char*>(data.data() + offset), packet_length - header_length);
-
             if (protocol_version == 0) {
-                messages.emplace_back(std::move(body));
-                //break;
-            } else if (protocol_version == 2) {
-                strm.avail_in = body.size();
-                strm.next_in  = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(body.data()));
-                if (inflateInit(&strm) != Z_OK) {
-                    std::cerr << "Failed to initialize zlib" << std::endl;
-                    continue;
-                }
-                do {
-                    std::vector<uint8_t> buffer(body.size() * 3);
-                    strm.avail_out = buffer.size();
-                    strm.next_out  = buffer.data();
-                    if (inflate(&strm, Z_NO_FLUSH) == Z_STREAM_ERROR) {
-                        std::cerr << "Failed to inflate zlib stream" << std::endl;
-                        break;
+                messages.emplace_back(reinterpret_cast<const char*>(body), body_len);
+            } else if (protocol_version == 2 && body_len > 0) {
+                // 每个压缩包单独解压。原实现复用跨包的 decompressed 缓冲区，
+                // 同一帧里出现多个 zlib 包时会把上一包内容重复解析一遍。
+                std::vector<uint8_t> decompressed;
+                decompressed.reserve(body_len * 4);
+
+                z_stream strm;
+                std::memset(&strm, 0, sizeof(strm));
+                strm.next_in  = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(body));
+                strm.avail_in = static_cast<uInt>(body_len);
+
+                if (inflateInit(&strm) == Z_OK) {
+                    int ret;
+                    do {
+                        uint8_t buffer[16384];
+                        strm.next_out  = buffer;
+                        strm.avail_out = sizeof(buffer);
+                        ret            = inflate(&strm, Z_NO_FLUSH);
+                        if (ret != Z_OK && ret != Z_STREAM_END) break;
+                        size_t produced = sizeof(buffer) - strm.avail_out;
+                        decompressed.insert(decompressed.end(), buffer, buffer + produced);
+                    } while (strm.avail_out == 0);
+                    inflateEnd(&strm);
+
+                    if (!decompressed.empty()) {
+                        auto nested_messages = parse_packet(decompressed);
+                        messages.insert(messages.end(), nested_messages.begin(), nested_messages.end());
                     }
-                    decompressed.insert(decompressed.end(), buffer.begin(),
-                                        buffer.begin() + buffer.size() - strm.avail_out);
-                } while (strm.avail_out == 0);
-                inflateEnd(&strm);
-                auto nested_messages = parse_packet(decompressed);
-                messages.insert(messages.end(), nested_messages.begin(), nested_messages.end());
+                }
             }
         }
-        offset += (packet_length - header_length);
+
+        offset += packet_length;
     }
 
     return messages;

@@ -12,6 +12,7 @@
 #include "live/dl_emoticon.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <chrono>
 
@@ -492,7 +493,12 @@ void LiveActivity::onDanmakuInfo(int roomid, const bilibili::LiveDanmakuinfo& in
             });
             
             // 连接弹幕服务器
-            this->danmaku.connect(room_id_copy, std::stoll(ProgramConfig::instance().getUserID()), info);
+            // 未登录时 getUserID() 返回空串，std::stoll("") 会抛异常，
+            // 整个连接逻辑会被 catch 吞掉，导致匿名用户完全没有弹幕。
+            uint64_t uid = 0;
+            const std::string uidStr = ProgramConfig::instance().getUserID();
+            if (!uidStr.empty()) uid = std::strtoull(uidStr.c_str(), nullptr, 10);
+            this->danmaku.connect(room_id_copy, uid, info);
             
 #if !defined(PLATFORM_XBOX360)
         } catch (const std::exception& e) {

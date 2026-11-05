@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <cstdlib>
+
 #include "bilibili/util/json.hpp"
 #include "user_result.h"
 #include "home_result.h"
@@ -63,12 +65,42 @@ inline void from_json(const nlohmann::json& nlohmann_json_j, DynamicListResultWr
 
 class DynamicUpResult {
 public:
-    bool has_update;
+    bool has_update = false;
     std::string face;
     std::string uname;
-    uint64_t mid;
+    uint64_t mid = 0;
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DynamicUpResult, has_update, face, uname, mid);
+
+// The uplist endpoint is not consistent about `mid`: it can arrive as an
+// unsigned/signed number, a decimal string, or null.  The Xbox 360 build is
+// compiled with -fno-exceptions (toolchain.cmake), so a strict
+// get<uint64_t>() on a mismatched type aborts the whole title instead of
+// failing the request — measured via KDNet: DynamicUpResult::from_json ->
+// nlohmann get_arithmetic_value<unsigned long long> -> abort -> bugcheck 0.
+// Parse defensively here; malformed values fall back to 0 and the rest of the
+// item is still usable.
+inline void from_json(const nlohmann::json& j, DynamicUpResult& t) {
+    if (j.contains("has_update") && j.at("has_update").is_boolean())
+        t.has_update = j.at("has_update").get<bool>();
+    if (j.contains("face") && j.at("face").is_string())
+        t.face = j.at("face").get<std::string>();
+    if (j.contains("uname") && j.at("uname").is_string())
+        t.uname = j.at("uname").get<std::string>();
+    if (j.contains("mid")) {
+        const auto& m = j.at("mid");
+        if (m.is_number_unsigned()) {
+            t.mid = m.get<uint64_t>();
+        } else if (m.is_number_integer()) {
+            const int64_t v = m.get<int64_t>();
+            if (v > 0) t.mid = static_cast<uint64_t>(v);
+        } else if (m.is_string()) {
+            t.mid = std::strtoull(m.get<std::string>().c_str(), nullptr, 10);
+        }
+    }
+}
+inline void to_json(nlohmann::json& j, const DynamicUpResult& t) {
+    j = nlohmann::json{{"has_update", t.has_update}, {"face", t.face}, {"uname", t.uname}, {"mid", t.mid}};
+}
 
 typedef std::vector<DynamicUpResult> DynamicUpListResult;
 
