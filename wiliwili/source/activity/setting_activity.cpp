@@ -630,15 +630,15 @@ void SettingActivity::onContentAvailable() {
                               ImageHelper::setRequestThreads(threadOption.rawOptionList[data]);
                           });
 
-    selectorInmemory->init("wiliwili/setting/app/playback/in_memory_cache"_i18n,
-#ifdef __PSV__
-                           {"0MB (" + "hints/off"_i18n + ")", "1MB", "5MB", "10MB"},
-#else
-        {"0MB (" + "hints/off"_i18n + ")", "10MB", "20MB", "50MB", "100MB"},
-#endif
-                           conf.getIntOptionIndex(SettingItem::PLAYER_INMEMORY_CACHE), [](int data) {
-                               auto inmemoryOption =
-                                   ProgramConfig::instance().getOptionData(SettingItem::PLAYER_INMEMORY_CACHE);
+    /// In-memory cache
+    // Labels are taken from the same option map as the values so the two can
+    // never fall out of sync (e.g. Xbox 360 ships 4 entries, desktop has 5).
+    auto inmemoryOption = conf.getOptionData(SettingItem::PLAYER_INMEMORY_CACHE);
+    std::vector<std::string> inmemoryLabels = inmemoryOption.optionList;
+    if (!inmemoryLabels.empty()) inmemoryLabels[0] += " (" + "hints/off"_i18n + ")";
+    selectorInmemory->init("wiliwili/setting/app/playback/in_memory_cache"_i18n, inmemoryLabels,
+                           conf.getIntOptionIndex(SettingItem::PLAYER_INMEMORY_CACHE), [inmemoryOption](int data) {
+                               if (data < 0 || (size_t)data >= inmemoryOption.rawOptionList.size()) return;
                                ProgramConfig::instance().setSettingItem(SettingItem::PLAYER_INMEMORY_CACHE,
                                                                         inmemoryOption.rawOptionList[data]);
                                if (MPVCore::INMEMORY_CACHE == inmemoryOption.rawOptionList[data]) return;
@@ -679,7 +679,12 @@ void SettingActivity::onContentAvailable() {
         "wiliwili/setting/app/network/proxy_hint"_i18n, "wiliwili/setting/app/network/proxy_hint"_i18n, 64);
 
 /// Hardware decode
-#if defined(PS4) || defined(__PSV__) && defined(BOREALIS_USE_OPENGL)
+// Xbox 360: the XAV path never produces a frame for H.264 (verified on two
+// consoles and with the official XDK SimpleXAV sample, with the codec pack
+// loaded), so the switch is hidden instead of shipping a setting that cannot
+// work.  See docs/XAV_PRIVATE_INTERFACES.md section 23.
+#if defined(PS4) || (defined(__PSV__) && defined(BOREALIS_USE_OPENGL)) || \
+    (defined(PLATFORM_XBOX360) && X360_XAV)
     btnHWDEC->setVisibility(brls::Visibility::GONE);
 #else
     btnHWDEC->init("wiliwili/setting/app/playback/hwdec"_i18n, conf.getBoolOption(SettingItem::PLAYER_HWDEC),

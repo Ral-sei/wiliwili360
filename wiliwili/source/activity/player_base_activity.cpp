@@ -3,6 +3,7 @@
 //
 
 #include <utility>
+#include <pystring.h>
 #include <borealis/core/thread.hpp>
 #include <borealis/core/touch/tap_gesture.hpp>
 #include <borealis/views/applet_frame.hpp>
@@ -161,37 +162,37 @@ private:
 
 class QualityDataSource : public DataSourceDropdown {
 public:
-    QualityDataSource(bilibili::VideoUrlResult result, BaseDropdown* view)
-        : DataSourceDropdown(view), data(std::move(result)) {
+    QualityDataSource(std::vector<int> quality, std::vector<std::string> description, BaseDropdown* view)
+        : DataSourceDropdown(view), quality(std::move(quality)), description(std::move(description)) {
         login = !ProgramConfig::instance().getCSRF().empty();
     }
 
     RecyclingGridItem* cellForRow(RecyclingGrid* recycler, size_t index) override {
         QualityCell* item = (QualityCell*)recycler->dequeueReusableCell("Cell");
 
-        int quality = data.accept_quality[index];
+        int q = this->quality[index];
 
         item->loginLabel->setVisibility(brls::Visibility::GONE);
         item->vipLabel->setVisibility(brls::Visibility::GONE);
 
-        if (quality > 80) {
+        if (q > 80) {
             item->vipLabel->setVisibility(brls::Visibility::VISIBLE);
-        } else if (quality >= 32) {
+        } else if (q >= 32) {
             if (!login) item->loginLabel->setVisibility(brls::Visibility::VISIBLE);
         }
 
-        auto r = this->data.accept_description[index];
-        item->title->setText(this->data.accept_description[index]);
+        item->title->setText(this->description[index]);
         item->setSelected(index == dropdown->getSelected());
         return item;
     }
 
-    size_t getItemCount() override { return (std::min)(data.accept_quality.size(), data.accept_description.size()); }
+    size_t getItemCount() override { return (std::min)(quality.size(), description.size()); }
 
     void clearData() override {}
 
 private:
-    bilibili::VideoUrlResult data;
+    std::vector<int> quality;
+    std::vector<std::string> description;
     bool login;
 };
 
@@ -463,15 +464,45 @@ void BasePlayerActivity::updateVideoLink() {
 void BasePlayerActivity::setVideoQuality() {
     if (this->videoUrlResult.accept_description.empty()) return;
 
+    // 平台清晰度上限：超过上限的档位既不请求也不在菜单中出现（见
+    // WILI_VIDEO_QUALITY_*_MAX；Xbox 360 为 1080P60，4K/8K 不提供）。
+    // 播放侧 onVideoPlayUrl 里有同样的收敛，这里只负责菜单显示与选择。
+    const int qualityMax = (std::max)(landscapeQualityMax, portraitQualityMax);
+
+    std::vector<int> qualities;
+    std::vector<std::string> descriptions;
+    int selected = 0;
+    for (size_t i = 0; i < this->videoUrlResult.accept_quality.size() &&
+                       i < this->videoUrlResult.accept_description.size();
+         i++) {
+        if (this->videoUrlResult.accept_quality[i] > qualityMax) continue;
+        if (this->videoUrlResult.accept_quality[i] == this->videoUrlResult.quality)
+            selected = (int)qualities.size();
+        qualities.emplace_back(this->videoUrlResult.accept_quality[i]);
+        descriptions.emplace_back(this->videoUrlResult.accept_description[i]);
+    }
+    if (qualities.empty()) {
+        // 兜底：服务端只返回了高于上限的档位时不裁剪（播放侧仍会收敛到上限）
+        qualities    = this->videoUrlResult.accept_quality;
+        descriptions = this->videoUrlResult.accept_description;
+        selected     = getQualityIndex();
+    }
+
     auto* dropdown = new BaseDropdown(
         "wiliwili/player/quality"_i18n,
-        [this](int selected) {
-            int code                           = this->videoUrlResult.accept_quality[selected];
-#if defined(__PSV__) || defined(PLATFORM_XBOX360)
-            // 软解上限 720P, 与配置默认值 WILI_VIDEO_QUALITY_*_MAX 一致,
+        [this, qualities](int selected) {
+            int code                           = qualities[selected];
+#if defined(__PSV__)
+            // PSV 软解上限 720P, 与配置默认值 WILI_VIDEO_QUALITY_*_MAX 一致,
             // 防止存储过的高清晰度设置绕过平台限制
             if (code > 64) {
                 code = 64;
+            }
+#endif
+#if defined(PLATFORM_XBOX360)
+            // 同上：菜单已过滤，这里再兜一层防止存储过的高清晰度绕过上限
+            if (code > 116) {
+                code = 116;
             }
 #endif
             BasePlayerActivity::defaultQuality = code;
@@ -485,10 +516,10 @@ void BasePlayerActivity::setVideoQuality() {
 
             this->updateVideoLink();
         },
-        getQualityIndex());
+        selected);
     auto* recycler = dropdown->getRecyclingList();
     recycler->registerCell("Cell", []() { return new QualityCell(); });
-    dropdown->setDataSource(new QualityDataSource(this->videoUrlResult, dropdown));
+    dropdown->setDataSource(new QualityDataSource(qualities, descriptions, dropdown));
     dropdown->registerAction(
         "", brls::ControllerButton::BUTTON_START,
         [dropdown](...) {
@@ -686,6 +717,14 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
             brls::Logger::debug("Dash quality: {}; video: {}; audio: {}", videoUrlResult.quality, v.codecid, a.id);
         }
 
+#if defined(PLATFORM_XBOX360)
+        // CATCHUP: 1080p H.264 decodes at ~20 fps on Xenon (six workers), so
+        // keeping every picture makes the video clock fall behind the audio
+        // (measured avsync +0.20 s/s, picture at 0.8x).  Skipping non-reference
+        // pictures keeps A/V aligned; 720p still keeps all frames.
+        MPVCore::instance().setSkipNonRefFrames(v.height >= 1080);
+#endif
+
         // 给播放器设置链接
         this->video->setUrl(v.base_url, start, end, audios);
 
@@ -696,6 +735,10 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
     } else {
         // flv
         brls::Logger::debug("Video type: flv");
+#if defined(PLATFORM_XBOX360)
+        // 同上：1080P 直播 FLV 同样解不动，丢非参考帧保同步。
+        MPVCore::instance().setSkipNonRefFrames(result.quality >= 80);
+#endif
         if (result.durl.empty()) {
             brls::Logger::error("No media");
         } else if (result.durl.size() == 1) {

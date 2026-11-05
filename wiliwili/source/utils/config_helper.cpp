@@ -116,11 +116,14 @@ static bool configFileExists(const std::string& path) {
 #define WILI_DNS_CACHE_TIMEOUT 3600000
 #else
 #if defined(PLATFORM_XBOX360)
-// Xbox 360: Xenon 软解上限 720p, 1080p+ 流解码必然卡顿 (性能计划 1080p 决策),
-// 因此默认与上限都限制在 720P (与 PSV 同一模式)。
+// Xbox 360 发布档位（详见 docs/XBOX360_RUNTIME_KNOBS.md「发布档位」）：
+// - 默认 720P (64)：Xenon 全帧软解可稳定 30fps，开箱即用。
+// - 1080P 不限制但不推荐：用户可在清晰度菜单里手动选择；1080p 流播放时自动
+//   进入 CATCHUP 档（丢非参考帧 + 跳去块，呈现约 6–8 帧/秒保音画同步）。
+// - 上限封顶 1080P60 (116)：4K/8K 档既不请求也不在菜单中出现。
 #define WILI_VIDEO_QUALITY_DEFAULT 64
-#define WILI_VIDEO_QUALITY_LANDSCAPE_MAX 64
-#define WILI_VIDEO_QUALITY_PORTRAIT_MAX 64
+#define WILI_VIDEO_QUALITY_LANDSCAPE_MAX 116
+#define WILI_VIDEO_QUALITY_PORTRAIT_MAX 116
 #else
 // 默认清晰度 (116 为 1080P@60)
 #define WILI_VIDEO_QUALITY_DEFAULT 116
@@ -254,6 +257,11 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
 #elif defined(__SWITCH__)
     {SettingItem::PLAYER_INMEMORY_CACHE,
      {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 0}},
+#elif defined(PLATFORM_XBOX360)
+    // 1080p 实测读流线程只喂到 3-4 秒就上不去（decode 线程抢核），
+    // 默认 10MB 顶不住网络抖动：抬到 20MB 并配合下面的 readahead。
+    {SettingItem::PLAYER_INMEMORY_CACHE,
+     {"player_inmemory_cache", {"0MB", "20MB", "50MB", "100MB"}, {0, 20, 50, 100}, 1}},
 #else
     {SettingItem::PLAYER_INMEMORY_CACHE,
      {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 1}},

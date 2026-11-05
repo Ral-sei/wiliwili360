@@ -41,8 +41,9 @@ public:
     // 720P
     static inline int defaultQuality = 150;
 #elif defined(PLATFORM_XBOX360)
-    // 超清 (720P): Xenon 软解上限为 720p, 1080p 流 (蓝光400/原画10000) 解码
-    // 必然卡顿, 因此在请求直播地址时就限档 (与 PSV 同一模式)。
+    // 默认超清 720P：Xenon 全帧软解可稳定 30fps。1080P (蓝光400/原画10000)
+    // 不限制但不推荐 —— 仍可在直播清晰度菜单里手动选择，1080p 流会自动进入
+    // CATCHUP 档，只保证音画同步不保证流畅。
     // qn 档位: 80 流畅 / 150 高清 / 250 超清720P / 400 蓝光1080P / 10000 原画
     static inline int defaultQuality = 250;
 #else

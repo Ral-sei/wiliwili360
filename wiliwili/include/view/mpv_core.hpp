@@ -176,6 +176,16 @@ public:
      */
     void setUrl(const std::string &url, const std::string &extra = "", const std::string &method = "replace");
 
+    // Xbox 360 CATCHUP policy: let libavcodec skip non-reference pictures and
+    // deblocking so the video clock follows the audio clock when the CPU cannot
+    // decode the stream in real time (1080p H.264 measures ~20 fps at six
+    // workers; without this the picture plays at 0.82x and avsync grows
+    // +0.18 s/s, with it the clock stays at 1.00x).  Both are init-time mpv
+    // options, so a change from what mpv was built with restarts mpv before
+    // the next loadfile.  A skipframe=/skiploop= line in game:\x360_play.cfg
+    // wins over this policy.
+    void setSkipNonRefFrames(bool enable);
+
     /**
      * 设置备用链接（可多次调用）
      * 内部使用 mpv 的播放列表实现。当前链接无法播放时，自动跳转到播放列表的下一项
@@ -421,6 +431,12 @@ private:
     // surface after a rect change during load: comparing only against the
     // recorded last video size would suppress that re-run.
     bool swSurfaceFromVideo        = false;
+    // CATCHUP policy request from the activity (see setSkipNonRefFrames) and
+    // the cfg-file override that suppresses it for A/B.
+    bool skipNonRefFrames          = false;
+    bool skipNonRefFramesApplied   = false; // value mpv was initialised with
+    bool skipNonRefFramesOverride  = false;
+    bool skipNonRefFramesRequested = false; // activity has chosen a value
 #else
     const int PIXCEL_SIZE          = 4;
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)

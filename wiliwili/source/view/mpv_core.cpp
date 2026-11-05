@@ -19,10 +19,17 @@
 
 #if defined(PLATFORM_XBOX360)
 extern "C" void xbox360_pthread_set_bind_spread(int enable);
+extern "C" int xbox360_vmx128_enabled;
+extern "C" int xbox360_h264_prof_enabled;
+extern "C" void xbox360_pthread_set_spread_cpus(const unsigned long* cpus, int count);
 #include <borealis/platforms/xbox360/xbox360_yuv.hpp>
 #include <borealis/platforms/xbox360/xbox360_video.hpp>
+#include "platform/xbox360/xbox360_ca.h"
 #if X360_XAV
 #include <borealis/platforms/xbox360/xbox360_xav.hpp>
+#include <borealis/platforms/xbox360/xbox360_xav_filefeed.hpp>
+#include <borealis/platforms/xbox360/xbox360_xav_log.hpp>
+#include <cpr/cpr.h>
 #endif
 #include <borealis/platforms/xbox360/xbox360_perf.hpp>
 
@@ -127,11 +134,13 @@ struct X360MpvStatsProbe {
         // （与主线程冻结是两种病：rd≈0 是拉不动流，主线程没卡也照样花屏音爆）。
         brls::Logger::info(
             "[x360-mpv] fps: container {:.2f} est-vf {:.2f} | drops: vo {} decoder {} vo-delayed {}"
-            " | cache {:.1f}s rd {:.2f} MB/s",
+            " | avsync {:.3f}s vpts {:.3f} apts {:.3f} | cache {:.1f}s rd {:.2f} MB/s",
             core.getDouble("container-fps"), core.getDouble("estimated-vf-fps"),
             core.getInt("frame-drop-count"), core.getInt("decoder-frame-drop-count"),
-            core.getInt("vo-delayed-frame-count"), core.getDouble("demuxer-cache-duration"),
-            core.getDouble("demuxer-cache-speed") / 1048576.0);
+            core.getInt("vo-delayed-frame-count"), core.getDouble("avsync"),
+            core.getDouble("video-pts"), core.getDouble("audio-pts"),
+            core.getDouble("demuxer-cache-duration"),
+            core.getDouble("cache-speed") / 1048576.0);   // mpv 0.36: I/O read rate
     }
 };
 X360MpvStatsProbe x360_mpvStats;
@@ -608,7 +617,19 @@ void MPVCore::init() {
     if (MPVCore::LOW_QUALITY) {
         // Less cpu cost
         brls::Logger::info("lavc: skip loop filter and set fast decode");
+#if defined(PLATFORM_XBOX360)
+        // Preserve deblocking on reference frames; skipping only non-reference
+        // frames avoids propagating artifacts into later pictures while still
+        // reducing decoder work on H.264/HEVC streams.
+        mpvSetOptionString(mpv, "vd-lavc-skiploopfilter", "nonref");
+        // Frame skipping (CATCHUP) is configured in the Xbox init section
+        // below: it must be set before mpv_initialize() -- a runtime
+        // `set vd-lavc-skipframe` / mpv_set_property_string() is accepted by
+        // mpv (the property reads back) but never reaches the decoder
+        // (measured 2026-11-02: avsync still +0.18 s/s).
+#else
         mpvSetOptionString(mpv, "vd-lavc-skiploopfilter", "all");
+#endif
         mpvSetOptionString(mpv, "vd-lavc-fast", "yes");
         if (mpvClientApiVersion() >= MPV_MAKE_VERSION(2, 2)) {
             mpvSetOptionString(mpv, "profile", "fast");
@@ -629,9 +650,41 @@ void MPVCore::init() {
         brls::Logger::info("set memory cache: {}MB", MPVCore::INMEMORY_CACHE);
         mpvSetOptionString(mpv, "demuxer-max-bytes", fmt::format("{}MiB", MPVCore::INMEMORY_CACHE).c_str());
         mpvSetOptionString(mpv, "demuxer-max-back-bytes", fmt::format("{}MiB", MPVCore::INMEMORY_CACHE / 2).c_str());
+#if defined(PLATFORM_XBOX360)
+        // Byte budget alone was not enough: with six decode workers on three
+        // cores the demuxer/network thread starves and the cache sits at 3-4 s
+        // until it hits zero and playback pauses for cache.  Ask the demuxer
+        // for a much deeper readahead so a stall is absorbed instead of shown.
+        mpvSetOptionString(mpv, "cache-secs", "30");
+        mpvSetOptionString(mpv, "demuxer-readahead-secs", "30");
+        mpvSetOptionString(mpv, "network-timeout", "30");
+#endif
     } else {
         mpvSetOptionString(mpv, "cache", "no");
     }
+#if defined(PLATFORM_XBOX360)
+    // The console streams over its own WiFi NIC through mbedTLS.  If the socket
+    // receive window stays at the XNet default, throughput is capped at
+    // window/RTT -- with a few tens of KB and a ~300 ms handshake round trip
+    // that lands right at the stream bitrate, which shows up as the cache
+    // sitting at 0-2 s and "paused for cache" every few seconds.  FFmpeg's tcp
+    // protocol forwards this to SO_RCVBUF (tcp.c), and lavf options reach it
+    // through the tls wrapper.  Ignored harmlessly if XNet clamps it.
+    mpvSetOptionString(mpv, "stream-lavf-o", "recv_buffer_size=262144");
+    // Mirror wiliwili's "TLS verify" setting (SettingItem::TLS_VERIFY, after
+    // the console-clock downgrade) into mpv's tls-verify so the lavf stream
+    // option agrees with the curl transport.  FFmpeg's tls backend applies the
+    // same switch from x360_tls_verify() per connection
+    // (docs/XBOX360_TLS_CA.md Phase 2).
+    mpvSetOptionString(mpv, "tls-verify", x360_tls_verify() ? "yes" : "no");
+    // Start playback only once the demuxer has a few seconds buffered.  Without
+    // this the first seconds run on an empty cache: audio starts immediately,
+    // video falls behind by the starved duration and mpv then spends the rest
+    // of the video dropping frames (observed: avsync pinned at 13 s with the
+    // renderer receiving only 5-7 new frames per second while decode was fine).
+    mpvSetOptionString(mpv, "cache-pause-initial", "yes");
+    mpvSetOptionString(mpv, "cache-pause-wait", "3");
+#endif
 
     // hardware decoding
     if (HARDWARE_DEC) {
@@ -658,7 +711,197 @@ void MPVCore::init() {
 #elif defined(PLATFORM_XBOX360)
     // Six logical hardware threads are available; cbffmpeg's pthread shim
     // spreads the workers across physical cores and then SMT siblings.
-    mpvSetOptionString(mpv, "vd-lavc-threads", "6");
+    //
+    // The worker count is the cheapest decoder-side A/B lever on Xenon:
+    // cbffmpeg P2 (standalone decoder harness) measured 1080p fastest at 3
+    // workers and 720p at 4; at 6 the extra workers wrap around the spread
+    // table {2,4,1,3} and contend with the cores that carry the main thread
+    // (UI + mpv render + YUV upload).  The harness optimum is not necessarily
+    // the player optimum — mpv adds demux/audio/vo threads — so keep the
+    // historical 6 as the default and allow a per-console override for A/B
+    // without rebuilding:
+    //     game:\x360_play.cfg   ->   vd_threads=4
+    // (H.264 uses frame threading in both cases: libavcodec's default
+    // thread_type is slice|frame and validate_thread_parameters() gives
+    // FF_THREAD_FRAME precedence, so no thread_type option is needed.)
+    // Decoder worker count and the round-robin affinity table can both be
+    // overridden per console for A/B without rebuilding:
+    //     game:\x360_play.cfg
+    //         vd_threads=6
+    //         spread=2,4,3,5       # default, see below
+    //
+    // Two tables were measured.  In the standalone decoder (cbffmpeg P2,
+    // bbb_1080 + skip_loop_filter, 6 workers) the six-entry table
+    // {1,3,5,2,0,4} reaches 25.6 fps against 17.2 for four entries — with only
+    // four the 5th/6th worker wrap back onto hw2/hw4 and hw0/hw5 are never
+    // used, so all six hardware threads never run together.
+    //
+    // That gain does NOT transfer to the player: in-app the six-entry table
+    // measured the same ~19 fps of decode while the UI frame build went from
+    // ~8 ms to 24-27 ms, because workers 5/6 land on hw0 and hw4 next to the
+    // main thread, which spends 6.5 ms/frame in swscale + 2.5 ms clear +
+    // 4.4 ms YUV upload.  The player is main-thread bound, so the default
+    // keeps every worker off core 0 ({2,4,3,5}).  The six-entry table stays
+    // available for decoder-side experiments:
+    //     spread=1,3,5,2,0,4
+    // CATCHUP: 1080p H.264 decodes at ~20 fps on Xenon, so keeping every
+    // picture makes the video clock fall behind the audio (avsync +0.2 s/s,
+    // picture at 0.8x, measured 2026-11-02).  Skipping non-reference pictures
+    // keeps A/V aligned.  This must be an init-time option: setting it at
+    // runtime is accepted but ignored by the decoder.  The activity later
+    // refines it per video from the real stream height (setSkipNonRefFrames);
+    // this default comes from the persisted quality so the common case does
+    // not need an mpv restart.
+#if defined(MPV_SW_RENDER)
+    if (!skipNonRefFramesRequested)
+        skipNonRefFrames =
+            ProgramConfig::instance().getIntOption(SettingItem::VIDEO_QUALITY) >= 80;
+    if (!skipNonRefFramesOverride) {
+        mpvSetOptionString(mpv, "vd-lavc-skipframe", skipNonRefFrames ? "nonref" : "no");
+        if (skipNonRefFrames) {
+            // CATCHUP also drops deblocking.  Measured on 1080p30: with
+            // skipframe=nonref alone the video clock is 0.82x (avsync +0.18
+            // s/s); adding skiploopfilter=all reaches 1.00x with 0.5 VO
+            // drops/s.  Deblocking on reference frames was the last ~15% of
+            // decode time.  Only for the CATCHUP tier: 720p keeps full quality.
+            mpvSetOptionString(mpv, "vd-lavc-skiploopfilter", "all");
+        }
+        skipNonRefFramesApplied = skipNonRefFrames;
+        brls::Logger::info("[x360-play] skipframe={} skiploop={} (init)",
+                           skipNonRefFrames ? "nonref" : "no",
+                           skipNonRefFrames ? "all" : "unchanged");
+    }
+    // ao_xaudio2 sizes its device ring from --audio-buffer.  With the decode
+    // workers saturating the cores, an AO thread stall longer than the default
+    // 200 ms underruns; the audio clock then resets ahead of the video and the
+    // gap cannot be recovered by frame skipping (measured 2026-11-02: two
+    // underruns in the first minute of 1080p playback, avsync then carried a
+    // ~2 s offset). 1 s is still invisible for playback (only pause/seek
+    // ramp-up notices it) and absorbs the startup burst as well.
+    mpvSetOptionString(mpv, "audio-buffer", "1.0");
+#endif
+    int vdThreads                = 6;
+    bool threadsOverride         = false;
+    unsigned long spreadCpus[6]  = { 2, 4, 3, 5, 2, 4 };
+    int spreadCount              = 4;
+    bool spreadOverride          = false;
+    if (FILE* cfg = fopen("game:\\x360_play.cfg", "rb"))
+    {
+        char line[128];
+        while (fgets(line, sizeof(line), cfg))
+        {
+            int n = 0;
+            char optval[16] = {0};
+            if (sscanf(line, "vd_threads=%d", &n) == 1 && n >= 1 && n <= 16) {
+                vdThreads       = n;
+                threadsOverride = true;
+            }
+            else if (!strncmp(line, "spread=", 7))
+            {
+                char* p = line + 7;
+                int k   = 0;
+                while (k < 6)
+                {
+                    char* end   = nullptr;
+                    unsigned long v = strtoul(p, &end, 10);
+                    if (end == p || v > 5)
+                        break;
+                    spreadCpus[k++] = v;
+                    p = end;
+                    if (*p != ',')
+                        break;
+                    ++p;
+                }
+                if (k > 0)
+                {
+                    spreadCount    = k;
+                    spreadOverride = true;
+                }
+            }
+            else if (sscanf(line, "vmx=%d", &n) == 1)
+            {
+                // VMX128 H.264 kernels A/B switch (see libavcodec/xbox360/).
+                xbox360_vmx128_enabled = n ? 1 : 0;
+            }
+            else if (sscanf(line, "prof=%d", &n) == 1)
+            {
+                // CABAC/recon cycle-counter split (H264SliceContext.x360_prof
+                // in libavcodec; prints [x360-h264prof] lines to the log).
+                xbox360_h264_prof_enabled = n ? 1 : 0;
+            }
+            else if (sscanf(line, "skipframe=%15s", optval) == 1)
+            {
+                // Decoder-side frame skipping A/B (CATCHUP policy):
+                // no|bidir|nonref|all.  Applies to the next file load and wins
+                // over the per-video quality gate in setSkipNonRefFrames().
+                mpvSetOptionString(mpv, "vd-lavc-skipframe", optval);
+                skipNonRefFramesOverride = true;
+                brls::Logger::info("[x360-play] vd-lavc-skipframe={} (override)", optval);
+            }
+            else if (sscanf(line, "skiploop=%15s", optval) == 1)
+            {
+                mpvSetOptionString(mpv, "vd-lavc-skiploopfilter", optval);
+                brls::Logger::info("[x360-play] vd-lavc-skiploopfilter={} (override)", optval);
+            }
+            else if (sscanf(line, "audio_buffer=%15s", optval) == 1)
+            {
+                // AO device ring size (ao_xaudio2 sizes from --audio-buffer).
+                // A/B for the presentation-pacing hypothesis.
+                mpvSetOptionString(mpv, "audio-buffer", optval);
+                brls::Logger::info("[x360-play] audio-buffer={} (override)", optval);
+            }
+            else if (!strncmp(line, "mpvopt=", 7))
+            {
+                // Generic pre-init mpv option: mpvopt=video-sync=audio
+                char* v = line + 7;
+                v[strcspn(v, "\r\n")] = 0;
+                char* eq = strchr(v, '=');
+                if (eq) {
+                    *eq = 0;
+                    mpvSetOptionString(mpv, v, eq + 1);
+                    brls::Logger::info("[x360-play] {}={} (override)", v, eq + 1);
+                }
+            }
+            else if (!strncmp(line, "avopts=", 7))
+            {
+                // Raw libavcodec AVOptions, e.g.
+                //     avopts=thread_type=slice
+                // Threading A/B without rebuilding: frame threading is
+                // libavcodec's default (slice|frame -> frame preferred);
+                // slice threading can decode one frame across workers.
+                char* v = line + 7;
+                v[strcspn(v, "\r\n")] = 0;
+                mpvSetOptionString(mpv, "vd-lavc-o", v);
+                brls::Logger::info("[x360-play] vd-lavc-o={} (override)", v);
+            }
+        }
+        fclose(cfg);
+    }
+    if (spreadOverride)
+    {
+        xbox360_pthread_set_spread_cpus(spreadCpus, spreadCount);
+        brls::Logger::info("[x360-play] spread={} entries (first {})", spreadCount,
+                           spreadCpus[0]);
+    }
+    // CATCHUP decodes reference pictures only, so the workload fits the four
+    // worker hardware threads without oversubscription.  Both settings were
+    // measured together (2026-11-02, 120 s runs): catchup + 4 workers + spread
+    // {2,4,3,5} -> avsync 0.01->0.40 (1.00x, a 7.6 s transient fully
+    // recovered); catchup + 4 workers with the shim's six-entry default
+    // {1,3,5,2,0,4} -> 0.96x, because workers 5/6 land on hw0 next to the main
+    // thread.  Without a cfg override the player default table is applied
+    // explicitly here; the shim default stays for the full-frame path.
+#if defined(MPV_SW_RENDER)
+    if (!threadsOverride && skipNonRefFrames) vdThreads = 4;
+    if (!spreadOverride && skipNonRefFrames)
+    {
+        xbox360_pthread_set_spread_cpus(spreadCpus, spreadCount);
+        brls::Logger::info("[x360-play] spread={} entries (catchup policy)", spreadCount);
+    }
+#endif
+    mpvSetOptionString(mpv, "vd-lavc-threads", fmt::format("{}", vdThreads).c_str());
+    brls::Logger::info("[x360-play] vd-lavc-threads={}{}", vdThreads,
+                       threadsOverride ? " (override: game:\\x360_play.cfg)" : " (init policy)");
     // NOTE: "framedrop=decoder+vo" was tried here and reverted: decoder-side
     // NONREF skipping engaged (decoder drops ~30/s, est-vf 60->31) but delay
     // still drifted +0.1~0.16 s/s, VO drop-gate kept the client at ~5.5Hz,
@@ -1069,13 +1312,20 @@ void MPVCore::setFrameSize(brls::Rect r) {
     drawWidth &= ~1;
     drawHeight &= ~1;
     if (drawWidth == 0 || drawHeight == 0) return;
-    // A pitch that is a multiple of 128 keeps the luma stride (and therefore
-    // the chroma stride, half of it) 32-byte aligned, which is what swscale
-    // requires before it will write into the buffer without an extra copy,
-    // and additionally lands every row on the 128-byte Xenon cache line so
-    // the per-frame plane upload copies whole lines (the frame pools in the
-    // Xbox 360 YouTube client are likewise 128-byte aligned).
-    const size_t newPitch  = ((size_t)drawWidth + 127) & ~(size_t)127;
+    // The stride mpv writes at must equal the pitch LockRect reports for the
+    // luma texture, otherwise Xbox360YUVRenderer::uploadPlane has to copy one
+    // row per call.  On Xenon the D3D9 driver rounds linear L8 pitch up to 256
+    // bytes: 1280/1440/1536 land on their own pitch (single bulk copy), while
+    // 1920 -> 2048 and 960 -> 1024 used to take the row path (measured
+    // 3038 KiB/frame at 4.6-5.0 ms, ~660 MB/s, versus ~1540 MB/s for the bulk
+    // sizes).  Ask the renderer for the real value; the 128-byte fallback is
+    // only for the window before the device exists, and still satisfies
+    // swscale's 32-byte stride requirement.
+    size_t newPitch = ((size_t)drawWidth + 127) & ~(size_t)127;
+    if (const size_t lockedPitch = brls::Xbox360YUVRenderer::planePitch(drawWidth, drawHeight);
+        lockedPitch >= (size_t)drawWidth && (lockedPitch & 1) == 0) {
+        newPitch = lockedPitch;
+    }
     const size_t requiredBytes = newPitch * (size_t)drawHeight + newPitch * (size_t)((drawHeight + 1) / 2);
 #else
     const size_t requiredBytes = (size_t)drawWidth * (size_t)drawHeight * PIXCEL_SIZE;
@@ -1259,8 +1509,59 @@ void startXavVideo(const std::string& url) {
     if (!videoContext || !videoContext->getDevice()) return;
     auto& xav = brls::Xbox360Xav::instance();
     if (!xav.init(videoContext->getDevice(), videoContext->getPresentParameters())) return;
-    if (!xav.open(url))
-        brls::Logger::error("XAV could not open the video stream (Optional Media Update codec pack missing?)");
+
+    // Validation hook for the private media source: an Annex-B stream sitting
+    // next to the executable replaces the network video so the
+    // IXcpManagedMediaStreamSource path can be exercised on hardware.  See
+    // docs/XAV_PRIVATE_INTERFACES.md section 21.
+    if (brls::xavFeedLocalH264File("game:\\xav_test.h264", xav)) return;
+
+    // Bilibili's CDN rejects requests without a Referer/User-Agent and XAV has
+    // no way to set either (XAVOpenParam has no such option), so the video is
+    // routed through a tiny proxy that adds them.  The proxy only forwards
+    // bytes: XAV still does its own demuxing and decoding.  Its address comes
+    // from game:\xav_proxy.txt so the same XEX works on any network.
+    std::string proxyBase = "http://192.168.2.2:8899";
+    if (FILE* cfg = fopen("game:\\xav_proxy.txt", "rb"))
+    {
+        char line[256] = {0};
+        if (fgets(line, sizeof(line), cfg))
+        {
+            std::string text(line);
+            while (!text.empty() &&
+                   (text.back() == '\n' || text.back() == '\r' || text.back() == ' '))
+                text.pop_back();
+            if (!text.empty()) proxyBase = text;
+        }
+        fclose(cfg);
+    }
+
+    // Register the target with the proxy off the UI thread: startXavVideo()
+    // runs from setUrl() on the UI thread, and this request can block for the
+    // full 5 s timeout when the proxy host is unreachable.  XAV's Open() still
+    // has to happen on the UI thread, so it is marshalled back with brls::sync.
+    // The generation counter drops a stale response if the user opened another
+    // video while the request was in flight.
+    const std::string targetUrl = proxyBase + "/target";
+    const std::string streamUrl = proxyBase + "/stream";
+    static std::atomic<unsigned> xavProxyGeneration{0};
+    const unsigned generation = ++xavProxyGeneration;
+    cpr::async([targetUrl, streamUrl, url, generation]() {
+        const cpr::Response response = cpr::Get(
+            cpr::Url{targetUrl}, cpr::Parameters{{"url", url}}, cpr::Timeout{5000});
+        const int status = static_cast<int>(response.status_code);
+        brls::sync([targetUrl, streamUrl, url, generation, status]() {
+            if (generation != xavProxyGeneration.load(std::memory_order_acquire)) return;
+            brls::Logger::info("XAV proxy {} -> {}", targetUrl, status);
+            brls::xavLog("proxy %s target status=%d url=%s", targetUrl.c_str(), status,
+                         url.c_str());
+            if (status != 200)
+                brls::Logger::warning("XAV proxy did not accept the target URL");
+            if (!brls::Xbox360Xav::instance().open(streamUrl))
+                brls::Logger::error(
+                    "XAV could not open the video stream (proxy or codec pack missing?)");
+        });
+    });
 }
 
 // Video-only draw for the XAV path: black background + the decoded texture.
@@ -1277,7 +1578,12 @@ void drawXavFrame(const brls::Rect& rect, float alpha) {
 
     auto& xav = brls::Xbox360Xav::instance();
     int w = 0, h = 0;
+    if (xav.samplesDelivered() == 0) xav.ensurePlaying();
     IDirect3DTexture9* tex = xav.acquireFrame(w, h);
+    static int frames = 0;
+    if ((++frames % 120) == 1)
+        brls::Logger::info("XAV draw: delivered={} texture={} {}x{} state={}",
+                           (int)xav.samplesDelivered(), tex ? 1 : 0, w, h, xav.playerState());
     if (tex && w > 0 && h > 0)
         brls::Xbox360YUVRenderer::drawTexture(vg, tex, w, h, rect.getMinX(), rect.getMinY(), rect.getWidth(),
                                               rect.getHeight(), alpha);
@@ -1761,11 +2067,41 @@ void MPVCore::reset() {
     setFrameSize(rect);
 }
 
+void MPVCore::setSkipNonRefFrames(bool enable) {
+#if defined(MPV_SW_RENDER) && defined(PLATFORM_XBOX360)
+    skipNonRefFrames          = enable;
+    skipNonRefFramesRequested = true;
+    brls::Logger::info("[x360-play] skip non-ref frames requested: {}", enable);
+#else
+    (void)enable;
+#endif
+}
+
 void MPVCore::setUrl(const std::string &url, const std::string &extra, const std::string &method) {
     brls::Logger::debug("{} Url: {}, extra: {}", method, url, extra);
 
     std::string mpvUrl   = url;
     std::string mpvExtra = extra;
+
+#if defined(MPV_SW_RENDER) && defined(PLATFORM_XBOX360)
+    // CATCHUP policy, applied per file: the option is discard-flagged, so it
+    // only takes effect at the next decoder init.  "set" is used because
+    // mpv_set_option_string() is a pre-mpv_initialize call.  Backup URLs
+    // ("append") inherit the current decoder options, so only "replace"
+    // touches this.
+    if (method == "replace" && !skipNonRefFramesOverride &&
+        skipNonRefFrames != skipNonRefFramesApplied) {
+        // The option only takes effect at mpv_initialize(). Do NOT restart mpv
+        // here: setUrl runs on the UI thread while mpv's render client is
+        // active, and restart() -> mpv "quit"/terminate waits for that client
+        // -> the UI thread deadlocks (measured 2026-11-02, switching to an FLV
+        // stream). Keep the current policy for this file; it is re-derived
+        // from the persisted quality at the next mpv init.
+        brls::Logger::info(
+            "[x360-play] skipframe {} requested but mpv is initialised with {}; applies at next mpv init",
+            skipNonRefFrames ? "nonref" : "no", skipNonRefFramesApplied ? "nonref" : "no");
+    }
+#endif
 
 #if defined(PLATFORM_XBOX360) && X360_XAV
     if (MPVCore::HARDWARE_DEC) {
