@@ -17,6 +17,11 @@
 #   - 其余 disable 面与 P3 完全一致：--disable-iconv、--disable-asm/altivec、
 #     flip0 表（含 POLL_H）、protocol_list(game:) 补丁。
 #
+# 运行时探针：[x360-dec] / [x360-sps] 解码器诊断默认关闭（-DX360_RUNTIME_PROBES=0）。
+# 需要采集时用 `X360_RUNTIME_PROBES=1 sh scripts/ffmpeg_x360_configure_local.sh`
+# 重新 configure/编译；FFmpeg 是预编译库，它和 CMake 侧的
+# XBOX360_RUNTIME_PROBES 是两个独立开关。
+#
 # 网络探测的现实（与 P2/P3 的"探测一律假阳性"同一根源，见
 # scripts/x360-cc-fake.sh / x360-ld-fake.sh 注释）：
 #   - check_func / check_func_headers 是 **链接** 探测（程序体只是
@@ -84,6 +89,7 @@ CFLAGS="-target powerpc-unknown-none-elf -O2 -ffreestanding -fno-builtin -fms-ex
 -include $COMPAT/include/xbox_ffmpeg_prelude.h \
  -Dsnprintf=avpriv_snprintf -Dvsnprintf=avpriv_vsnprintf \
  -I$MBEDTLS_CONFIG -I$MBEDTLS/include \
+ -DX360_RUNTIME_PROBES=${X360_RUNTIME_PROBES:-0} \
  -D_XBOX"
 
 mkdir -p "$BLD"
@@ -125,6 +131,7 @@ cd "$BLD"
     --enable-demuxer=flv \
     --enable-demuxer=live_flv \
     --enable-demuxer=hls \
+    --enable-muxer=h264 \
     --enable-protocol=file \
     --enable-protocol=tcp \
     --enable-protocol=http \

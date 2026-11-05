@@ -80,13 +80,20 @@ export FFMPEG_BUILD_DIR=${FFMPEG_BUILD_DIR:-${REPO}/build/ffmpeg-x360-tls}
     exit 1
 }
 
+# Runtime probes are OFF in normal builds.  For a measurement build (the O8
+# decoder-thread A/B and the playback perf plans) run:
+#     RUNTIME_PROBES=1 bash scripts/build_xbox360_local.sh
+# Use the same setting for every variant of a comparison.
+PROBES="${RUNTIME_PROBES:-OFF}"
+
 cmake -S "${REPO}" -B "${BUILD_DIR}" -G Ninja \
     -DPLATFORM_XBOX360=ON \
     -DMPV_SW_RENDER=ON \
     -DDISABLE_OPENCC=ON \
     -DDISABLE_WEBP=ON \
+    -DXBOX360_RUNTIME_PROBES="${PROBES}" \
     -DCMAKE_BUILD_TYPE=Release
 
-echo "Building Xbox 360 XEX in ${BUILD_DIR} (jobs=${JOBS})"
+echo "Building Xbox 360 XEX in ${BUILD_DIR} (jobs=${JOBS}, runtime probes=${PROBES})"
 cmake --build "${BUILD_DIR}" --target wiliwili --parallel "${JOBS}"
 printf 'XEX: %s/wiliwili\n' "${BUILD_DIR}"
