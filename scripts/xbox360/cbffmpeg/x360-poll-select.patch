@@ -1,0 +1,120 @@
+diff --git a/compat/mpv/include/poll.h b/compat/mpv/include/poll.h
+--- a/compat/mpv/include/poll.h
++++ b/compat/mpv/include/poll.h
+@@ -10,11 +10,12 @@
+  *   osdep/polldev.c      —— polldev() 直接转调 poll()
+  *   osdep/subprocess-posix.c / stream/stream_file.c / input/ipc-unix.c
+  *                         —— 都有 fd 不合法/超时为 0 的守卫
+- * 实现（x360_mpv_posix.c）：timeout==0 立刻返回 0；否则短暂 sleep 后把
+- * events 非 0 的 fd 一律报 ready。真"可读"要靠 select()/设备驱动，Xbox 的
+- * CRT 没有；P4 不触发这些路径（IPC 未启用、本地文件 S_ISREG 为真不走
+- * use_poll、终端线程因 pipe 失败根本不起），这里给的是**能链上、语义不假装**
+- * 的桩。
++ * 实现（x360_mpv_posix.c）：socket fd 走 Winsock select() 的真实可读/可写
++ * 等待（XNet 提供 select，curl 的传输循环一直在用）。旧版"睡满 timeout 再
++ * 一律报 ready"的桩只保留给 select 表达不了的集合（非 socket fd、超过
++ * FD_SETSIZE 项）。注意 FFmpeg 的 tcp_read() 每次 recv 前都会
++ * poll(..., 100ms)，桩实现会把这个 sleep 变成每读一个 TLS record 的固定
++ * 开销，把播放读流速度钉死在 ~26KB/s —— 所以这里必须是真等待。
+  */
+ #ifndef MPV_X360_POLL_H
+ #define MPV_X360_POLL_H
+diff --git a/compat/mpv/x360_mpv_posix.c b/compat/mpv/x360_mpv_posix.c
+--- a/compat/mpv/x360_mpv_posix.c
++++ b/compat/mpv/x360_mpv_posix.c
+@@ -900,15 +900,84 @@
+ 
+ int poll(struct pollfd *fds, nfds_t nfds, int timeout)
+ {
++    fd_set rfds, wfds, efds;
++    struct timeval tv, *tvp;
+     nfds_t i;
+     int ready = 0;
++    int any = 0;
+ 
+     if (!fds && nfds) {
+         errno = EINVAL;
+         return -1;
+     }
+-    /* timeout==0：纯粹问"现在有没有"。Xbox 的 CRT fd 不支持非阻塞查询，
+-     * 无法给出真实答案 —— 但"不阻塞地问"也不该睡。 */
++
++    /* FFmpeg 的 tcp_read() 在每次 recv() 前都调
++     * ff_network_wait_fd(POLLING_TIME=100ms) —— 下面这条旧桩"先睡满 timeout
++     * 再一律报 ready"，等于给每个 TLS record 强加 100ms。读流速度因此被钉在
++     * (单次 record 字节数)/0.1s：真机播放时反复缓冲、cache-speed 只有
++     * 26.49 KB/s，正好是一小块 record / 100ms 的量级。
++     *
++     * 这里 poll 的对象是 XNet socket，而 XNet 有 select()（curl 的整个传输
++     * 循环就跑在 select 上，是这条栈上已验证的路径），所以可读性探测是有的。
++     * 旧行为只作为 select 表达不了的集合的兜底（非 socket 的 CRT fd、超过
++     * FD_SETSIZE 项）—— FFmpeg 不会产生这两种，mpv 的 polldev 才可能。 */
++    if (nfds > FD_SETSIZE)
++        goto fallback;
++
++    FD_ZERO(&rfds);
++    FD_ZERO(&wfds);
++    FD_ZERO(&efds);
++
++    for (i = 0; i < nfds; i++) {
++        fds[i].revents = 0;
++        if (fds[i].fd < 0)
++            continue;
++        if (fds[i].events & (POLLIN | POLLRDNORM))
++            FD_SET((SOCKET)fds[i].fd, &rfds);
++        if (fds[i].events & (POLLOUT | POLLWRNORM))
++            FD_SET((SOCKET)fds[i].fd, &wfds);
++        if (fds[i].events & POLLPRI)
++            FD_SET((SOCKET)fds[i].fd, &efds);
++        any = 1;
++    }
++
++    if (!any)
++        return 0;
++
++    if (timeout < 0) {
++        tvp = NULL;                       /* 无限等待 */
++    } else {
++        tv.tv_sec  = timeout / 1000;
++        tv.tv_usec = (timeout % 1000) * 1000;
++        tvp = &tv;
++    }
++
++    if (select(0, &rfds, &wfds, &efds, tvp) == SOCKET_ERROR) {
++        /* 非 socket：保持旧桩"睡满再报 ready"，让原本能走的调用方继续走。 */
++        if (WSAGetLastError() == WSAENOTSOCK)
++            goto fallback;
++        return -1;
++    }
++
++    for (i = 0; i < nfds; i++) {
++        if (fds[i].fd < 0)
++            continue;
++        /* Winsock 的 exceptfds 同时承载 OOB 和非阻塞 connect 的失败，
++         * FFmpeg 对后者的处理是"可写/出错 -> getsockopt(SO_ERROR)"，
++         * 所以统一报 POLLERR 正是它期望的语义。 */
++        if (FD_ISSET((SOCKET)fds[i].fd, &rfds))
++            fds[i].revents |= POLLIN;
++        if (FD_ISSET((SOCKET)fds[i].fd, &wfds))
++            fds[i].revents |= POLLOUT;
++        if (FD_ISSET((SOCKET)fds[i].fd, &efds))
++            fds[i].revents |= POLLERR;
++        if (fds[i].revents)
++            ready++;
++    }
++    return ready;
++
++fallback:
++    /* 旧的桩行为：timeout==0 立即返回 0；否则睡满后把请求过的事件都报 ready。 */
+     if (timeout == 0)
+         return 0;
+ 
+@@ -918,8 +987,6 @@
+     for (i = 0; i < nfds; i++) {
+         fds[i].revents = 0;
+         if (fds[i].events) {
+-            /* 没有真可读性探测手段（无 select/驱动 poll），按"请求数就报到"
+-             * 返回；调用方要么是有超时的轮询，要么根本跑不到（IPC/子进程）。 */
+             fds[i].revents = (short)(fds[i].events & (POLLIN | POLLOUT | POLLPRI));
+             if (!fds[i].revents)
+                 fds[i].revents = POLLIN;

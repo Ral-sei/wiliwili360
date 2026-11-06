@@ -680,8 +680,10 @@ cache 45.8s rd 0.04 MB/s    // cache-secs 之上，正常空闲
 “cache 10 s 降到 0、rd 0.00” 是历史进度恢复后播放到文件尾（apts 550/553），
 不是网络问题。
 
-**注意**：该修复在 cbffmpeg 树里，与本仓库分开版本管理；换机器/重新打包前
-必须用更新后的 `libmpv_xbox360_compat.a`，否则会退回旧桩。
+**注意**：cbffmpeg 不在本仓库内，也没有版本管理。补丁已存档在
+`scripts/xbox360/cbffmpeg/x360-poll-select.patch`（在 cbffmpeg 根目录
+`patch -p1` 应用，再跑 `scripts/mpv_x360_compat_archive.sh` 重打归档）；
+换机器/重新打包前必须用更新后的 `libmpv_xbox360_compat.a`，否则会退回旧桩。
 
 ### 5.14 第十三轮（2026-11-06，真机崩溃：curl `trynextip` 野指针）
 
