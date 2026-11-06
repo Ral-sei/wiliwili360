@@ -126,6 +126,187 @@ static void x360_dns_lock_release(void)
     InterlockedExchange(&x360_dns_lock, 0);
 }
 
+/* ------------------------------------------------------------------------
+ * 自有 DNS 客户端（A 记录），绕开 XNet 的 8 条上限。
+ *
+ * XNDNS 只有 aina[8]，devkit 上链接的 checked xam 在解析到超过 8 条 A 记录时
+ * 会直接 assert（0xC0000420），整台主机卡死。B 站直播弹幕节点
+ * zj-cn-live-comet.chat.bilibili.com 走 CNAME 后一次返回 15 条 A 记录，
+ * 所以"打开直播就卡死"是必现的。这里自己发 UDP 查询、自己解析，A 记录取
+ * 前 8 条即可，XNetDnsLookup 只作为最后兜底保留。
+ *
+ * 解析器用国内公共 DNS（与 PS4 分支的 primaryDNSStr 一致），按序尝试；
+ * 全部失败时返回 0，由调用方回退到 XNet。
+ * ------------------------------------------------------------------------ */
+#define X360_DNS_RESOLVERS 3
+static const unsigned char x360_dns_servers[X360_DNS_RESOLVERS][4] = {
+    { 223,   5,   5,   5 },   /* AliDNS */
+    { 119,  29,  29,  29 },   /* DNSPod */
+    { 114, 114, 114, 114 },   /* 114DNS */
+};
+
+static int x360_dns_build_query(unsigned char* buf, int cap, const char* name,
+                                unsigned short id)
+{
+    int n = 12;
+    size_t i, len;
+
+    if (!name || !name[0]) return 0;
+    len = strlen(name);
+    /* 18 = header tail + root + QTYPE/QCLASS; 11 = EDNS0 OPT record below. */
+    if (len > 253 || cap < (int)len + 29) return 0;
+
+    memset(buf, 0, 12);
+    buf[0] = (unsigned char)(id >> 8);
+    buf[1] = (unsigned char)(id & 0xff);
+    buf[2] = 0x01;   /* RD */
+    buf[5] = 0x01;   /* QDCOUNT = 1 */
+
+    i = 0;
+    while (i < len) {
+        size_t j = i;
+        while (j < len && name[j] != '.') j++;
+        if (j == i || j - i > 63) return 0;   /* empty or over-long label */
+        buf[n++] = (unsigned char)(j - i);
+        memcpy(buf + n, name + i, j - i);
+        n += (int)(j - i);
+        i = j + 1;
+    }
+    buf[n++] = 0;          /* root label */
+    buf[n++] = 0; buf[n++] = 1;   /* QTYPE  A */
+    buf[n++] = 0; buf[n++] = 1;   /* QCLASS IN */
+
+    /* EDNS0 OPT: advertise a 1232-byte UDP payload.  Without it the servers
+       cap the answer at 512 bytes and a CNAME chain plus 9-15 A records (the
+       live comet host) comes back truncated with ancount == 0, which used to
+       send us back to XNetDnsLookup and its 8-record assertion. */
+    buf[n++] = 0;                 /* root */
+    buf[n++] = 0; buf[n++] = 41;  /* TYPE  OPT */
+    buf[n++] = 0x04; buf[n++] = 0xd0;  /* CLASS = 1232 */
+    buf[n++] = 0; buf[n++] = 0; buf[n++] = 0; buf[n++] = 0;  /* TTL */
+    buf[n++] = 0; buf[n++] = 0;   /* RDLEN */
+    buf[11] = 0x01;               /* ARCOUNT = 1 */
+    return n;
+}
+
+/* Returns the offset just past the (possibly compressed) name, or -1. */
+static int x360_dns_skip_name(const unsigned char* buf, int len, int off)
+{
+    int guard = 0;
+    while (off >= 0 && off < len && guard++ < 128) {
+        unsigned char c = buf[off];
+        if (c == 0) return off + 1;
+        if ((c & 0xc0) == 0xc0) return off + 2;   /* pointer terminates the name */
+        if (c & 0xc0) return -1;
+        off += 1 + (int)c;
+    }
+    return -1;
+}
+
+static int x360_dns_parse_response(const unsigned char* buf, int len,
+                                   unsigned short id, struct in_addr* out, int max)
+{
+    int off, qd, an, i, found = 0;
+
+    if (len < 12) return 0;
+    if (((buf[0] << 8) | buf[1]) != (int)id) return 0;   /* wrong transaction */
+    if ((buf[2] & 0x80) == 0) return 0;                 /* not a response */
+
+    qd = (buf[4] << 8) | buf[5];
+    an = (buf[6] << 8) | buf[7];
+
+    off = 12;
+    for (i = 0; i < qd; i++) {
+        off = x360_dns_skip_name(buf, len, off);
+        if (off < 0 || off + 4 > len) return 0;
+        off += 4;
+    }
+
+    for (i = 0; i < an && found < max; i++) {
+        int rtype, rclass, rdlen;
+        off = x360_dns_skip_name(buf, len, off);
+        if (off < 0 || off + 10 > len) break;
+        rtype  = (buf[off] << 8) | buf[off + 1];
+        rclass = (buf[off + 2] << 8) | buf[off + 3];
+        rdlen  = (buf[off + 8] << 8) | buf[off + 9];
+        off += 10;
+        if (rdlen < 0 || off + rdlen > len) break;
+        if (rtype == 1 && rclass == 1 && rdlen == 4) {
+            memcpy(&out[found], buf + off, 4);
+            found++;
+        }
+        off += rdlen;
+    }
+    return found;
+}
+
+static int x360_dns_ask(const unsigned char server[4], const char* name,
+                        struct in_addr* out, int max)
+{
+    SOCKET s;
+    struct sockaddr_in to;
+    unsigned char q[512], r[1500];
+    unsigned short id;
+    int qlen, n, got = 0;
+    DWORD start;
+
+    id   = (unsigned short)GetTickCount();
+    qlen = x360_dns_build_query(q, sizeof(q), name, id);
+    if (qlen <= 0) return 0;
+
+    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return 0;
+    {
+        /* Same SNL opt-out curl's connect path uses; harmless if rejected. */
+        int on = 1;
+        setsockopt(s, SOL_SOCKET, 0x5801, (const char*)&on, sizeof(on));
+    }
+
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port   = htons(53);
+    memcpy(&to.sin_addr.s_addr, server, 4);
+
+    if (sendto(s, (const char*)q, qlen, 0, (struct sockaddr*)&to, sizeof(to)) == qlen) {
+        start = GetTickCount();
+        while (GetTickCount() - start < 900) {
+            fd_set rs;
+            struct timeval tv;
+            DWORD left = 900 - (GetTickCount() - start);
+
+            FD_ZERO(&rs);
+            FD_SET(s, &rs);
+            tv.tv_sec  = 0;
+            tv.tv_usec = (long)left * 1000;
+            n = select(0, &rs, NULL, NULL, &tv);
+            if (n <= 0) break;   /* timeout / error */
+            n = recvfrom(s, (char*)r, sizeof(r), 0, NULL, NULL);
+            if (n <= 0) continue;
+            got = x360_dns_parse_response(r, n, id, out, max);
+            if (got > 0) break;
+        }
+    }
+
+    closesocket(s);
+    return got;
+}
+
+/* Synchronous A-record lookup.  Returns the number of addresses written
+   (at most max); 0 means every resolver failed and the caller should fall
+   back to XNetDnsLookup. */
+int x360_dns_lookup_a(const char* name, struct in_addr* out, int max)
+{
+    int i, n;
+
+    if (!name || !out || max <= 0) return 0;
+    for (i = 0; i < X360_DNS_RESOLVERS; i++) {
+        n = x360_dns_ask(x360_dns_servers[i], name, out, max);
+        if (n > 0) return n;
+    }
+    DbgPrint("[dns] udp failed %s (falling back to XNet)", name);
+    return 0;
+}
+
 struct x360_hostent_slot {
     struct hostent he;
     char name_buffer[256];
@@ -135,6 +316,24 @@ struct x360_hostent_slot {
 
 static struct x360_hostent_slot x360_dns_ring[X360_DNS_RING];
 static unsigned x360_dns_seq = 0;
+
+static struct hostent* x360_make_hostent(const char* name, struct in_addr addr)
+{
+    unsigned seq = __sync_fetch_and_add(&x360_dns_seq, 1);
+    struct x360_hostent_slot* slot = &x360_dns_ring[seq % X360_DNS_RING];
+
+    slot->address = addr;
+    strncpy(slot->name_buffer, name, sizeof(slot->name_buffer) - 1);
+    slot->name_buffer[sizeof(slot->name_buffer) - 1] = '\0';
+    slot->address_list[0] = (char*)&slot->address;
+    slot->address_list[1] = NULL;
+    slot->he.h_name      = slot->name_buffer;
+    slot->he.h_aliases   = NULL;
+    slot->he.h_addrtype  = AF_INET;
+    slot->he.h_length    = sizeof(slot->address);
+    slot->he.h_addr_list = slot->address_list;
+    return &slot->he;
+}
 
 struct hostent* gethostbyname(const char* name)
 {
@@ -171,6 +370,24 @@ struct hostent* gethostbyname(const char* name)
             DbgPrint("[dns] cache hit %s", name);
             x360_dns_lock_release();
             return &slot->he;
+        }
+    }
+
+    /* 先用自有 UDP 解析器。XNet 的 XNDNS 只有 8 条 A 记录的位置，devkit 上
+       的 checked xam 在直播弹幕节点返回 15 条时会直接 assert（表现为打开直播
+       就卡死）。自己解析则没有这个上限，且不像 XNet resolver 那样要拿全局锁
+       排队。全部公共 DNS 都失败时才回退到 XNet。 */
+    {
+        struct in_addr addrs[8];
+        if (x360_dns_lookup_a(name, addrs, 8) > 0) {
+            struct hostent* he = x360_make_hostent(name, addrs[0]);
+            unsigned char* ipa = (unsigned char*)&addrs[0];
+            x360_dns_cache_put(name, addrs[0]);
+            DbgPrint("[dns] udp %s -> %u.%u.%u.%u", name,
+                     (unsigned)ipa[0], (unsigned)ipa[1],
+                     (unsigned)ipa[2], (unsigned)ipa[3]);
+            x360_dns_lock_release();
+            return he;
         }
     }
 
