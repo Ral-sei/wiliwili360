@@ -661,6 +661,27 @@ mbedtls_connect_step1(struct connectdata *conn, int sockindex)
   mbedtls_ssl_set_bio(&connssl->ssl, &conn->sock[sockindex],
                        mbedtls_bio_send, mbedtls_bio_recv, NULL);
 
+  /* Resume a session cached for this host, if there is one.  An abbreviated
+     TLS 1.2 handshake skips the certificate chain validation that costs
+     ~1.4 s of a ~2 s handshake on Xenon.  The cache lives in curl and is
+     shared between handles through CURLSHOPT_SHARE + CURL_LOCK_DATA_SSL_SESSION. */
+  {
+    void *ssl_sessionid = NULL;
+    if(Curl_ssl_getsessionid(conn, &ssl_sessionid, NULL) == 0 &&
+       ssl_sessionid) {
+      if(mbedtls_ssl_set_session(&connssl->ssl,
+                                 (const mbedtls_ssl_session *)ssl_sessionid)
+         == 0) {
+        infof(data, "mbedTLS: resuming a cached session for %s\n",
+              conn->host.name);
+      }
+      else {
+        /* Stale entry: drop it and do a full handshake instead. */
+        Curl_ssl_delsessionid(conn, ssl_sessionid);
+      }
+    }
+  }
+
 #ifdef _XBOX
   /* XNet's ioctlsocket is the authoritative FIONBIO path.  The generic
      curlx_nonblock wrapper can select an unavailable CRT branch on this port,
@@ -836,6 +857,26 @@ mbedtls_connect_step2(struct connectdata *conn, int sockindex)
   infof(data, "mbedTLS: Handshake complete, cipher is %s\n",
         mbedtls_ssl_get_ciphersuite(&connssl->ssl));
 
+  /* Cache the negotiated session so the next connection to this host can
+     resume it instead of re-verifying the whole certificate chain. */
+  {
+    void *ssl_sessionid = NULL;
+    if(Curl_ssl_getsessionid(conn, &ssl_sessionid, NULL) != 0) {
+      mbedtls_ssl_session *session = calloc(1, sizeof(*session));
+      if(session) {
+        if(mbedtls_ssl_get_session(&connssl->ssl, session) == 0) {
+          if(Curl_ssl_addsessionid(conn, session, 0) != CURLE_OK) {
+            mbedtls_ssl_session_free(session);
+            free(session);
+          }
+        }
+        else {
+          free(session);
+        }
+      }
+    }
+  }
+
 #ifdef _XBOX
   /* Keep the socket blocking for the whole curl transfer.  XNet's readiness
      reporting is unreliable for TLS records; restoring non-blocking mode here
@@ -916,7 +957,11 @@ void Curl_mbedtls_close(struct connectdata *conn, int sockindex)
 
 void Curl_mbedtls_session_free(void *ptr)
 {
-  free(ptr);
+  if(ptr) {
+    /* The cached session owns heap blocks inside mbedtls_ssl_session. */
+    mbedtls_ssl_session_free((mbedtls_ssl_session *)ptr);
+    free(ptr);
+  }
 }
 
 size_t Curl_mbedtls_version(char *buffer, size_t size)

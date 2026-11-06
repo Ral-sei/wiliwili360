@@ -58,8 +58,14 @@ public:
     CurlSharedObject() {
         share = curl_share_init();
         curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
-        // TODO: 下列两个选线不支持多线程，需要实现自定义线程池，每个线程共享一个 curl share 对象
-        // curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+        // Share the TLS session cache: every request builds a new easy handle,
+        // so without this an abbreviated mbedTLS handshake could never be
+        // reached and each connection re-verifies the full certificate chain
+        // (~1.4 s of a ~2 s handshake on Xenon).  curl protects the cache with
+        // the lock callbacks below.
+        curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+        // TODO: CURL_LOCK_DATA_CONNECT 需要每线程共享一个 curl share 对象（keep-alive
+        // 还受 curl fork 的响应终结判断限制，见 docs/XBOX360_NETWORK_PERFORMANCE_REVIEW.md §6）
         // curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
         curl_share_setopt(share, CURLSHOPT_LOCKFUNC, lock_callback);
         curl_share_setopt(share, CURLSHOPT_UNLOCKFUNC, unlock_callback);
@@ -114,9 +120,8 @@ public:
     static std::shared_ptr<cpr::Session> createSession() {
         auto session = std::make_shared<cpr::Session>();
         CURL* curl = session->GetCurlHolder()->handle;
-#if !defined(PLATFORM_XBOX360)
+        // Shared DNS cache + TLS session cache (see CurlSharedObject).
         curl_easy_setopt(curl, CURLOPT_SHARE, HTTP::CURL_SHARE.getShare());
-#endif
         curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, HTTP::DNS_CACHE_TIMEOUT);
         session->SetTimeout(cpr::Timeout{bilibili::HTTP::TIMEOUT});
 #if defined(PLATFORM_XBOX360)

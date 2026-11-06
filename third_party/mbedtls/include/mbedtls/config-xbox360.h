@@ -105,6 +105,12 @@
 #define MBEDTLS_SSL_PROTO_TLS1
 #define MBEDTLS_SSL_PROTO_TLS1_1
 #define MBEDTLS_SSL_PROTO_TLS1_2
+/* Session tickets: an abbreviated handshake skips the certificate chain
+ * verification, which the [tls] state probe attributed ~1.4 s of a ~2 s
+ * handshake on Xenon (st: CERT=1368 CKE=53).  curl keeps the negotiated
+ * sessions in its host/session cache and hands them back through
+ * mbedtls_ssl_set_session() on the next connection. */
+#define MBEDTLS_SSL_SESSION_TICKETS
 /* NO MBEDTLS_SSL_SRV_C - client only */
 /* NO MBEDTLS_SSL_PROTO_DTLS */
 
