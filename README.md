@@ -11,34 +11,35 @@
 </p>
 
 
+
 ## 下载
 
-前往 **[Releases](https://github.com/Ral-sei/wiliwili360/releases)** 下载。
+前往 [**Releases**](https://github.com/Ral-sei/wiliwili360/releases) 下载。
 
 1. 下载最新 release 中的 Xbox 360 压缩包并解压；
 2. 将解压出的 `wiliwili.xex` 和 `resources` 目录放在**同一个目录**下；
 3. 把该目录放入主机硬盘（例如 `Hdd1:\wiliwili\`），通过 Aurora / XeXmenu / FSD 启动；
 
-配置文件与缓存位于 `game:\config\wiliwili\`，删除该目录可恢复默认设置。
+配置文件与缓存位于 `game:(wiliwili所在文件夹位置)\config\wiliwili\`，删除该目录可恢复默认设置。
 
 ## 当前状态
 
 已经打通的链路：
 
-- **界面**：XDK D3D9 + NanoVG 渲染，XML 布局、字体、图片、焦点导航均可用；
-- **网络**：XNet + libcurl + mbedTLS，WBI 签名、首页推荐、搜索、视频详情、`playurl` 等接口可用；
-- **播放**：libmpv 0.36 + FFmpeg 4.4.8 软件渲染，YUV 由 GPU 上屏，点播 720p 实机可达约 30fps 视频 + 53–60fps UI；
-- **输入**：XInput 手柄导航与播放器按键；
-- **其它**：扫码登录、历史、收藏、直播、弹幕等页面已接入，部分功能仍在校验；
+* **界面**：XDK D3D9 + NanoVG 渲染，XML 布局、字体、图片、焦点导航均可用；
+* **网络**：XNet + libcurl + mbedTLS，WBI 签名、首页推荐、搜索、视频详情、`playurl` 等接口可用；
+* **播放**：libmpv 0.36 + FFmpeg 4.4.8 软件渲染，YUV 由 GPU 上屏，点播 720p 实机可达约 30fps 视频 + 53–60fps UI；
+* **输入**：XInput 手柄导航与播放器按键；
+* **其它**：扫码登录、历史、收藏、直播、弹幕等页面已接入，部分功能仍在校验；
 
-已知限制（仍在补齐）：
+已知限制：
 
-- DLNA 投屏不支持；
-- TLS 证书校验暂时关闭（尚未内置 CA bundle）；
-- XAV 硬件解码为实验功能且当前工具链不可用，默认关闭，仅软件解码；
-- 镜像画面、着色器、均衡器不可用。
+* 1080p只有20fps左右，所以默认720p播放
+* DLNA 投屏不支持，（xbox360其实原生支持）；
+* XAV 硬件解码已证实无法调用，仅软件解码；
+* 镜像画面、着色器、均衡器不可用。（放过这个老家伙吧）
 
-更多细节与实机记录见 [`docs/XBOX360_PORTING_PLAN.md`](docs/XBOX360_PORTING_PLAN.md) 及其配套文档。
+更多细节与实机记录见 [`docs/XBOX360_PORTING_PLAN.md`](docs/XBOX360_PORTING_PLAN.md) 及其配套文档。（完全AI脱出）
 
 ## 编译
 
@@ -47,14 +48,14 @@
 
 ### 依赖
 
-| 依赖 | 说明 |
-|---|---|
-| [OXDK](https://github.com/MrMilenko/OXDK) | 链接脚本、`oxdklink`、Xenon 运行库与 cshim |
-| Xbox 360 XDK | 需自行安装（不可再分发），提供 `xboxkrnl.lib`、`d3d9.lib` 等 |
-| OXDK LLVM | 带 Xenon ABI 补丁的 clang/lld，默认 `$HOME/oxdk-llvm/build` |
-| FFmpeg 4.4.8 | 已随仓库提供：`third_party/ffmpeg-4.4.8`（含 Xbox 补丁，已入库） |
-| cbffmpeg | 外部依赖树：`libmpv.a`、libass/libxml2、compat 层，以及 mpv 的构建脚本 |
-| 构建机 | Debian/Ubuntu 或 WSL（需要 `cmake`、`ninja`、`python3`、`make`） |
+|依赖|说明|
+|-|-|
+|[OXDK](https://github.com/MrMilenko/OXDK)|链接脚本、`oxdklink`、Xenon 运行库与 cshim|
+|Xbox 360 XDK|需自行安装（不可再分发），提供 `xboxkrnl.lib`、`d3d9.lib` 等|
+|OXDK LLVM|带 Xenon ABI 补丁的 clang/lld，默认 `$HOME/oxdk-llvm/build`|
+|FFmpeg 4.4.8|已随仓库提供：`third_party/ffmpeg-4.4.8`（含 Xbox 补丁，已入库）|
+|cbffmpeg|外部依赖树：`libmpv.a`、libass/libxml2、compat 层，以及 mpv 的构建脚本|
+|构建机|Debian/Ubuntu 或 WSL（需要 `cmake`、`ninja`、`python3`、`make`）|
 
 > XDK 安装路径通常带空格，构建脚本会在构建目录里创建一个无空格软链，无需手动处理。
 
@@ -104,12 +105,12 @@ cbffmpeg/build/libxml2-x360/lib/libxml2.a
 
 **3. 路径覆盖**
 
-| 变量 | 默认值 |
-|---|---|
-| `CBFFMPEG_DIR` | `../cbffmpeg` |
-| `FFMPEG_SRC` | `<repo>/third_party/ffmpeg-4.4.8` |
-| `FFMPEG_BUILD_DIR` | `<repo>/build/ffmpeg-x360-tls` |
-| `MPV_BUILD_DIR` | `$CBFFMPEG_DIR/build/mpv-x360-p4` |
+|变量|默认值|
+|-|-|
+|`CBFFMPEG_DIR`|`../cbffmpeg`|
+|`FFMPEG_SRC`|`<repo>/third_party/ffmpeg-4.4.8`|
+|`FFMPEG_BUILD_DIR`|`<repo>/build/ffmpeg-x360-tls`|
+|`MPV_BUILD_DIR`|`$CBFFMPEG_DIR/build/mpv-x360-p4`|
 
 `scripts/ffmpeg_x360_configure_local.sh` 还支持 `FFMPEG_SRC`、`FFMPEG_BUILD`、
 `FFMPEG_COMPAT`、`OXDK`、`XDK`、`LLVM`、`PKG_CONFIG_LIBDIR` 等环境变量，
@@ -161,27 +162,30 @@ cmake --build build-xbox360 --target wiliwili -j$(nproc)
 
 需要注意：
 
-- `LLD` 必须指向 cbffmpeg 的 `compat/xbox360/x360-ld.sh`（构建脚本会自动探测）。
-  它给 `ld.lld` 追加 `--wrap=getsockopt --wrap=WSAStartup`，否则 mpv 的 http/tcp 会以
-  10042/10057 全线失败；
-- FFmpeg/mpv 归档路径可用 `FFMPEG_BUILD_DIR`、`MPV_BUILD_DIR` 覆盖；任一归档缺失会直接
-  在 configure 阶段 `FATAL_ERROR`，不会链出一个缺符号的 XEX；
-- `third_party/` 已内置 Xbox 版 curl 与 mbedTLS，`BILI360_DIR` 仅作为回退。
+* `LLD` 必须指向 cbffmpeg 的 `compat/xbox360/x360-ld.sh`（构建脚本会自动探测）。
+它给 `ld.lld` 追加 `--wrap=getsockopt --wrap=WSAStartup`，否则 mpv 的 http/tcp 会以
+10042/10057 全线失败；
+* FFmpeg/mpv 归档路径可用 `FFMPEG_BUILD_DIR`、`MPV_BUILD_DIR` 覆盖；任一归档缺失会直接
+在 configure 阶段 `FATAL_ERROR`，不会链出一个缺符号的 XEX；
+* `third_party/` 已内置 Xbox 版 curl 与 mbedTLS，`BILI360_DIR` 仅作为回退。
+* 这个移植完全由AI移植的，甚至这个README也是AI生成的，特别粗糙。
+* 大概不会提交PR，因为未经审核的AI编写代码对维护者来说是负担。
 
 ### 可选构建开关
 
-| 开关 | 默认 | 说明 |
-|---|---|---|
-| `-DXBOX360_XAV=ON` | OFF | 实验性 XAV 硬件解码路径，当前受工具链阻塞，不可用 |
-| `-DXBOX360_NANOVG_D3D9=ON` | OFF | 使用 vendored NanoVG D3D9 核心（默认用 borealis fork） |
-| `-DXBOX360_RUNTIME_PROBES=ON` | OFF | 打开 `[x360-*]` 运行时诊断日志，排障时使用 |
+|开关|默认|说明|
+|-|-|-|
+|`-DXBOX360_XAV=ON`|OFF|实验性 XAV 硬件解码路径，当前受工具链阻塞，不可用|
+|`-DXBOX360_NANOVG_D3D9=ON`|OFF|使用 vendored NanoVG D3D9 核心（默认用 borealis fork）|
+|`-DXBOX360_RUNTIME_PROBES=ON`|OFF|打开 `[x360-*]` 运行时诊断日志，排障时使用|
 
 更完整的依赖安装、故障排查与实机部署说明见
 [`docs/XBOX360_DEBIAN_BUILD.md`](docs/XBOX360_DEBIAN_BUILD.md)。
 
----
+\---
 
 # 原 README
+
 
 
 <p align="center">
@@ -200,25 +204,25 @@ cmake --build build-xbox360 --target wiliwili -j$(nproc)
 <b><a href="#开发">开发</a></b>
 </p>
 
-- - -
+\---
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/xfangfang/wiliwili)](https://github.com/xfangfang/wiliwili/releases)
-![GitHub All Releases](https://img.shields.io/github/downloads/xfangfang/wiliwili/total)
-![GitHub stars](https://img.shields.io/github/stars/xfangfang/wiliwili?style=flat)
-![GitHub forks](https://img.shields.io/github/forks/xfangfang/wiliwili)
-[![Crowdin](https://badges.crowdin.net/wiliwili/localized.svg)](https://crowdin.com/project/wiliwili)
-![NS](https://img.shields.io/badge/-Nintendo%20Switch-e4000f?style=flat&logo=Nintendo%20Switch)
-![PSV](https://img.shields.io/badge/-PSVita-003791?style=flat&logo=PlayStation)
-![PS4](https://img.shields.io/badge/-PS4-003791?style=flat&logo=PlayStation)
-![MS](https://img.shields.io/badge/-Windows%207+-357ec7?style=flat&logo=Windows)
-![mac](https://img.shields.io/badge/-macOS%2010.11+-black?style=flat&logo=Apple)
-![Linux](https://img.shields.io/badge/-Linux-lightgrey?style=flat&logo=Linux&logoColor=white)
-[![fedora](https://img.shields.io/badge/fedora-copr-blue?logo=fedora)](https://copr.fedorainfracloud.org/coprs/mochaa/wiliwili/)
-[![Scoop Version (extras bucket)](https://img.shields.io/scoop/v/wiliwili?bucket=extras)](https://scoop.sh/#/apps?q=wiliwili)
-[![aur](https://img.shields.io/aur/version/wiliwili?color=blue&logo=archlinux)](https://aur.archlinux.org/packages/wiliwili/)
-[![Flathub](https://img.shields.io/flathub/v/cn.xfangfang.wiliwili)](https://flathub.org/apps/cn.xfangfang.wiliwili)
-[![nightly.link](https://img.shields.io/badge/nightly.link-%E6%B5%8B%E8%AF%95%E7%89%88-green)](https://nightly.link/xfangfang/wiliwili/workflows/build.yaml/dev)
-[![layout](https://img.shields.io/badge/wiliwili-自定义布局-yellow)](https://github.com/xfangfang/wiliwili_theme)
+[!\[GitHub release (latest by date)](https://img.shields.io/github/v/release/xfangfang/wiliwili)](https://github.com/xfangfang/wiliwili/releases)
+!\[GitHub All Releases](https://img.shields.io/github/downloads/xfangfang/wiliwili/total)
+!\[GitHub stars](https://img.shields.io/github/stars/xfangfang/wiliwili?style=flat)
+!\[GitHub forks](https://img.shields.io/github/forks/xfangfang/wiliwili)
+[!\[Crowdin](https://badges.crowdin.net/wiliwili/localized.svg)](https://crowdin.com/project/wiliwili)
+!\[NS](https://img.shields.io/badge/-Nintendo%20Switch-e4000f?style=flat\&logo=Nintendo%20Switch)
+!\[PSV](https://img.shields.io/badge/-PSVita-003791?style=flat\&logo=PlayStation)
+!\[PS4](https://img.shields.io/badge/-PS4-003791?style=flat\&logo=PlayStation)
+!\[MS](https://img.shields.io/badge/-Windows%207+-357ec7?style=flat\&logo=Windows)
+!\[mac](https://img.shields.io/badge/-macOS%2010.11+-black?style=flat\&logo=Apple)
+!\[Linux](https://img.shields.io/badge/-Linux-lightgrey?style=flat\&logo=Linux\&logoColor=white)
+[!\[fedora](https://img.shields.io/badge/fedora-copr-blue?logo=fedora)](https://copr.fedorainfracloud.org/coprs/mochaa/wiliwili/)
+[!\[Scoop Version (extras bucket)](https://img.shields.io/scoop/v/wiliwili?bucket=extras)](https://scoop.sh/#/apps?q=wiliwili)
+[!\[aur](https://img.shields.io/aur/version/wiliwili?color=blue&logo=archlinux)](https://aur.archlinux.org/packages/wiliwili/)
+[!\[Flathub](https://img.shields.io/flathub/v/cn.xfangfang.wiliwili)](https://flathub.org/apps/cn.xfangfang.wiliwili)
+[!\[nightly.link](https://img.shields.io/badge/nightly.link-测试版-green)](https://nightly.link/xfangfang/wiliwili/workflows/build.yaml/dev)
+[!\[layout](https://img.shields.io/badge/wiliwili-自定义布局-yellow)](https://github.com/xfangfang/wiliwili\_theme)
 
 <br>
 
@@ -228,7 +232,7 @@ wiliwili 拥有非常接近官方PC客户端的B站浏览体验
 同时支持**触屏**、**鼠标**、**键盘** 与 **手柄**操控  
 无论是电脑还是游戏掌机都能获得全新的使用体验
 
-多语言：简、繁、日、韩、英 ...   
+多语言：简、繁、日、韩、英 ...  
 搜索页：热搜 视频 番剧 影视  
 筛选页：快速找到想看的影视内容  
 动态页：关注的UP主最近视频动态  
@@ -246,7 +250,7 @@ wiliwili 拥有非常接近官方PC客户端的B站浏览体验
 1. 下载 `wiliwili-NintendoSwitch.zip`：[wiliwili releases](https://github.com/xfangfang/wiliwili/releases)
 2. 将 wiliwili.nro 放置在**内存卡** `switch` 目录下。
 3. 在主页 `按住` R键打开任意游戏进入 hbmenu，在列表中选择 wiliwili 点击打开即可。
-4. [可选] 在应用内安装桌面图标，入口：设置/实用工具/使用教程
+4. \[可选] 在应用内安装桌面图标，入口：设置/实用工具/使用教程
 
 <details>
 
@@ -298,44 +302,44 @@ PC客户端支持切换硬件解码、秒开流畅适合老电脑、支持鼠标
 
 <details>
 
-- [x] 初步完成底层基础组件、首页各类推荐视频、用户视频播放页
-- [x] 微调页面、解决播放器启动速度慢、解决播放页面退出卡顿
-- [x] 临时解决异步加载导致的空指针问题（图片异步加载某些情况还会出现问题，待修复）
-- [x] 添加番剧/影视播放、添加扫码登录、播放历史、用户收藏夹（收藏夹相关部分工作不稳定）
-- [x] 初步添加搜索
-- [x] 播放页新增分集与UP主最新投稿
-- [x] 完善视频播放页用户评论内容
-- [x] 重构图片异步加载逻辑
-- [x] 解决收藏夹、搜索页某些情况导致闪退的问题
-- [x] 完善搜索页：番剧、影视 转为竖图
-- [x] 完善播放页投稿列表：调整结构、自动加载下一页
-- [x] 播放页展示合集与推荐
-- [x] 添加动态页
-- [x] 添加视频检索页
-- [x] 完善设置页
-- [x] 弹幕相关设置
-- [x] 点赞、投币、收藏
-- [x] 拖拽调节进度
-- [x] 增加单手模式使用一个手柄来控制播放器
-- [x] NSP forwarder自动检查多个位置的nro文件，避免无法打开
-- [x] 增加设置使首页无法通过返回退出，避免误触
-- [x] 使用教程添加未指明的快捷键说明
-- [x] 重压摇杆临时快进
-- [x] 支持切换按键图标
-- [x] 应用内多语言切换
-- [x] 重构搜索页面
-- [x] 评论@显示不同颜色
-- [x] 完善评论图片
-- [x] 评论大表情包所在行增加行高
-- [x] 支持webp图片
-- [ ] 搜索支持搜索用户
-- [ ] 长按一键三连
-- [ ] 支持个人主页
-- [ ] 评论跳转进度
-- [ ] 评论跳转搜索
-- [ ] 评论下方的更多信息 (up主点赞等内容)
-- [ ] 投票评论
-- [ ] 互动视频
+* \[x] 初步完成底层基础组件、首页各类推荐视频、用户视频播放页
+* \[x] 微调页面、解决播放器启动速度慢、解决播放页面退出卡顿
+* \[x] 临时解决异步加载导致的空指针问题（图片异步加载某些情况还会出现问题，待修复）
+* \[x] 添加番剧/影视播放、添加扫码登录、播放历史、用户收藏夹（收藏夹相关部分工作不稳定）
+* \[x] 初步添加搜索
+* \[x] 播放页新增分集与UP主最新投稿
+* \[x] 完善视频播放页用户评论内容
+* \[x] 重构图片异步加载逻辑
+* \[x] 解决收藏夹、搜索页某些情况导致闪退的问题
+* \[x] 完善搜索页：番剧、影视 转为竖图
+* \[x] 完善播放页投稿列表：调整结构、自动加载下一页
+* \[x] 播放页展示合集与推荐
+* \[x] 添加动态页
+* \[x] 添加视频检索页
+* \[x] 完善设置页
+* \[x] 弹幕相关设置
+* \[x] 点赞、投币、收藏
+* \[x] 拖拽调节进度
+* \[x] 增加单手模式使用一个手柄来控制播放器
+* \[x] NSP forwarder自动检查多个位置的nro文件，避免无法打开
+* \[x] 增加设置使首页无法通过返回退出，避免误触
+* \[x] 使用教程添加未指明的快捷键说明
+* \[x] 重压摇杆临时快进
+* \[x] 支持切换按键图标
+* \[x] 应用内多语言切换
+* \[x] 重构搜索页面
+* \[x] 评论@显示不同颜色
+* \[x] 完善评论图片
+* \[x] 评论大表情包所在行增加行高
+* \[x] 支持webp图片
+* \[ ] 搜索支持搜索用户
+* \[ ] 长按一键三连
+* \[ ] 支持个人主页
+* \[ ] 评论跳转进度
+* \[ ] 评论跳转搜索
+* \[ ] 评论下方的更多信息 (up主点赞等内容)
+* \[ ] 投票评论
+* \[ ] 互动视频
 
 </details>
 
@@ -344,10 +348,10 @@ PC客户端支持切换硬件解码、秒开流畅适合老电脑、支持鼠标
 # 反馈问题前要做的事
 
 1. 网络相关的问题附加 `网络诊断截图`，入口：应用内设置/实用工具/网络诊断
-2. [Switch用户] 要确保 `大气层`和`系统固件` 更新到 **最新** ，`内存卡`为 **FAT32**
-3. [Switch用户] 如果打开应用黑屏时间过长，可以尝试删除内存卡目录 `config/wiliwili` 重新进入
+2. \[Switch用户] 要确保 `大气层`和`系统固件` 更新到 **最新** ，`内存卡`为 **FAT32**
+3. \[Switch用户] 如果打开应用黑屏时间过长，可以尝试删除内存卡目录 `config/wiliwili` 重新进入
 4. 确保 `系统时间`正确、系统`网络设置`正确（主要是DNS）、如果使用了`网络代理`请在反馈前关闭并重新测试
-5. 查找有没有其他人出现过类似的问题：[Issues](https://github.com/xfangfang/wiliwili/issues?q=is%3Aissue)
+5. 查找有没有其他人出现过类似的问题：[Issues](https://github.com/xfangfang/wiliwili/issues?q=is:issue)
 6. **完整且详细地** 描述你的问题，最好附加演示视频、截图。
 7. 尝试复现问题，尽力找到BUG出现的规律
 
@@ -357,13 +361,13 @@ PC客户端支持切换硬件解码、秒开流畅适合老电脑、支持鼠标
 
 ### 软件移植
 
-本应用基于 nanovg 绘制界面，nanovg 底层可移植切换到任意图形库，已有 OpenGL/Vulkan/Metal 等支持。   
+本应用基于 nanovg 绘制界面，nanovg 底层可移植切换到任意图形库，已有 OpenGL/Vulkan/Metal 等支持。  
 视频播放部分则使用 FFMPEG + MPV 绘制，默认使用 OpenGL，有 D3D11/Deko3d/Gxm 或软件渲染支持。  
 触摸/按键/输入法等平台相关功能通过 GLFW 或 SDL 来支持，也可以脱离二者直接实现，比如 Gxm 版 PSV。
 
 如果你要移植的设备支持 OpenGL(ES) 那么一般来说，直接编译就能正常运行。  
 如果你要移植的设备使用其他底层图形库，那么首先需要移植 nanovg，这可以确保应用主要界面正常，
-其次为了更好的性能表现需要 ffmpeg 的硬解和 mpv 的渲染支持。  
+其次为了更好的性能表现需要 ffmpeg 的硬解和 mpv 的渲染支持。
 
 如果你有想要移植的设备欢迎发一条 issue 讨论，Android / iOS 不在讨论之内。
 
@@ -443,6 +447,7 @@ mingw32-make -C build wiliwili -j$(nproc)
 ```
 
 
+
 </details>
 
 ### 交叉编译 Switch 可执行文件 (wiliwili.nro)
@@ -486,8 +491,9 @@ make -C cmake-build-switch wiliwili.nro -j$(nproc)
 ### 交叉编译 PSV 可执行文件
 
 使用本地环境来编译可以参考：
- - [borealis 编译指南](https://github.com/xfangfang/borealis/wiki/PS-Vita)
- - [wiliwili vita 编译指南](https://gist.github.com/xfangfang/305da139721ad4e96d7a9d9a1a550a9d)
+
+* [borealis 编译指南](https://github.com/xfangfang/borealis/wiki/PS-Vita)
+* [wiliwili vita 编译指南](https://gist.github.com/xfangfang/305da139721ad4e96d7a9d9a1a550a9d)
 
 注意: 我们使用自定义的 mbedtls, curl 和 ffmpeg 作为依赖, 在使用本地环境编译时，请先卸载 vitasdk 中的相关库，再安装[指定的](https://github.com/xfangfang/wiliwili/tree/yoga/scripts/psv)依赖.
 
@@ -513,10 +519,11 @@ docker run --rm -v $(pwd):/src/ xfangfang/wiliwili_psv_builder:latest-gxm \
 
 ### 交叉编译 PS4 可执行文件
 
-使用本地环境来编译可以参考: 
- - [PacBrew 环境安装](https://github.com/PacBrew/pacbrew-packages)
- - [borealis 编译指南](https://github.com/xfangfang/borealis/wiki/PS4)
- - [编译 wiliwili 依赖的第三方库](https://github.com/xfangfang/wiliwili/blob/dev/scripts/ps4/Dockerfile)
+使用本地环境来编译可以参考:
+
+* [PacBrew 环境安装](https://github.com/PacBrew/pacbrew-packages)
+* [borealis 编译指南](https://github.com/xfangfang/borealis/wiki/PS4)
+* [编译 wiliwili 依赖的第三方库](https://github.com/xfangfang/wiliwili/blob/dev/scripts/ps4/Dockerfile)
 
 <details>
 
@@ -555,33 +562,38 @@ cmake --build build
 
 The development of wiliwili cannot do without the support of the following organization and open source projects.
 
-- Toolchain: devkitpro, switchbrew, vitasdk OpenOrbis and PacBrew
-    - https://github.com/devkitPro
-    - https://github.com/switchbrew/libnx
-    - https://github.com/vitasdk
-    - https://github.com/OpenOrbis
-    - https://github.com/PacBrew
-- UI Library: natinusala and XITRIX
-    - https://github.com/natinusala/borealis
-    - https://github.com/XITRIX/borealis
-- Video Player: Cpasjuste, proconsule, fish47 and averne
-    - https://github.com/Cpasjuste/pplay
-    - https://github.com/proconsule/nxmp
-    - https://github.com/fish47/FFmpeg-vita
-    - https://github.com/fish47/mpv-vita
-    - http://github.com/averne/FFmpeg
-    - http://github.com/averne/mpv
-- Misc
-    - https://github.com/libcpr/cpr
-    - https://github.com/nlohmann/json
-    - https://github.com/nayuki/QR-Code-generator
-    - https://github.com/BYVoid/OpenCC
-    - https://github.com/imageworks/pystring
-    - https://github.com/sammycage/lunasvg
-    - https://github.com/cesanta/mongoose
-    - https://chromium.googlesource.com/webm/libwebp
-    - https://github.com/fancycode/MemoryModule
+* Toolchain: devkitpro, switchbrew, vitasdk OpenOrbis and PacBrew
+
+  * https://github.com/devkitPro
+  * https://github.com/switchbrew/libnx
+  * https://github.com/vitasdk
+  * https://github.com/OpenOrbis
+  * https://github.com/PacBrew
+* UI Library: natinusala and XITRIX
+
+  * https://github.com/natinusala/borealis
+  * https://github.com/XITRIX/borealis
+* Video Player: Cpasjuste, proconsule, fish47 and averne
+
+  * https://github.com/Cpasjuste/pplay
+  * https://github.com/proconsule/nxmp
+  * https://github.com/fish47/FFmpeg-vita
+  * https://github.com/fish47/mpv-vita
+  * http://github.com/averne/FFmpeg
+  * http://github.com/averne/mpv
+* Misc
+
+  * https://github.com/libcpr/cpr
+  * https://github.com/nlohmann/json
+  * https://github.com/nayuki/QR-Code-generator
+  * https://github.com/BYVoid/OpenCC
+  * https://github.com/imageworks/pystring
+  * https://github.com/sammycage/lunasvg
+  * https://github.com/cesanta/mongoose
+  * https://chromium.googlesource.com/webm/libwebp
+  * https://github.com/fancycode/MemoryModule
 
 # Special thanks
 
-- Thanks to Crowdin for supporting [open-source projects](https://crowdin.com/page/open-source-project-setup-request).
+* Thanks to Crowdin for supporting [open-source projects](https://crowdin.com/page/open-source-project-setup-request).
+
