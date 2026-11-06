@@ -632,6 +632,121 @@ libc++ guard 不可重入”的既有注释有关；没有 KD 栈可证实，故
 （0.05–2.3 s，`xbox360_stubs.c` 的全局锁跨 `XNetDnsLookup` 等待）+ 首次完整握手；
 之后走缓存/会话恢复。
 
+### 5.13 第十二轮（2026-11-06，播放频繁缓冲：poll() 桩每次 recv 睡 100 ms）
+
+> 环境：devkit 192.168.2.9，`RUNTIME_PROBES=1` 构建；`[x360-mpv]` 埋点。
+
+**现象**（用户反馈）：播放时频繁缓冲，画面显示缓存速度 **26.49 KB/s**，缓存条
+迟迟填不满；切一次清晰度再切回来又恢复正常。
+
+**根因**不在 mpv/FFmpeg 的缓存参数，也不在解码线程抢核，而在
+`cbffmpeg/compat/mpv/x360_mpv_posix.c` 的 `poll()` 桩：
+
+```c
+if (timeout > 0) usleep(timeout * 1000);   /* 先睡满 timeout */
+/* 再把 requests 里的事件全部当作 ready 返回 */
+```
+
+FFmpeg 的 `tcp_read()` 在**每次 `recv()` 之前**都调
+`ff_network_wait_fd(s->fd, 0, ...)`（`libavformat/network.c:74`），超时用
+`POLLING_TIME = 100 ms`（`libavformat/network.h:249`）。于是每个 TLS record
+都先被强制睡 100 ms，读流速度被钉在 `(单次 record 字节数) / 0.1 s`：26.49 KB/s
+≈ 2.7 KB / 100 ms，正好对上。网络本身是空闲的，所以重连（切清晰度）后缓存能
+瞬间冲满，但下一次读又会掉进同一个 100 ms。
+
+**修复**：poll 的目标 fd 都是 XNet socket，而 XNet 有 `select()`（curl 的整个
+传输循环就跑在 select 上，是这条栈上已验证的路径），所以把 socket 集改成真实
+的 select 等待，`POLLNVAL`/`FD_SETSIZE` 表达不了的集合（非 socket CRT fd、
+>64 项）才回退到旧桩行为。改的是 cbffmpeg（不在本仓库）：
+
+- `cbffmpeg/compat/mpv/x360_mpv_posix.c`：`poll()` 改为 select 实现；
+- `cbffmpeg/compat/mpv/include/poll.h`：更新说明（原注释“Xbox 没有可读性探测”
+  只对 CRT fd 成立，对 socket 不成立）；
+- 重新打包：`cbffmpeg/scripts/mpv_x360_compat_archive.sh`（本机路径见
+  `cbffmpeg/build/rebuild_compat_local.sh`）→ 重新链接 wiliwili。
+
+**修复后实测**（`[x360-mpv]`，30 fps 视频、720P）：
+
+```
+cache 0.8s rd 0.02 MB/s     // 起播，未开始预读
+cache 14.2s rd 0.18 MB/s
+cache 41.7s rd 1.63 MB/s
+cache 42.7s rd 2.85 MB/s    // 预读吃满后 demuxer 主动停读
+cache 45.8s rd 0.04 MB/s    // cache-secs 之上，正常空闲
+```
+
+读流峰值 **1.6–2.9 MB/s**（旧桩上限约 0.16 MB/s，且实际被 record 尺寸压到
+几十 KB/s），缓存稳定在 40 s 以上，播放不再因网络饥饿暂停。实测中先出现的
+“cache 10 s 降到 0、rd 0.00” 是历史进度恢复后播放到文件尾（apts 550/553），
+不是网络问题。
+
+**注意**：该修复在 cbffmpeg 树里，与本仓库分开版本管理；换机器/重新打包前
+必须用更新后的 `libmpv_xbox360_compat.a`，否则会退回旧桩。
+
+### 5.14 第十三轮（2026-11-06，真机崩溃：curl `trynextip` 野指针）
+
+同一晚排查“直接卡住”时，KDNet 连接后恢复运行，主机立即写崩溃转储并重启。
+转储：`DEVKIT:\dumps\wiliwili.xex\wiliwili.xex2.dmp`（109 MB，18:16）。
+
+`i386kd -z` 解析结果：
+
+```
+(1.f9000014): Access violation - code c0000005
+wiliwili+0x787a28: lwz r3,4(r26)     ; r26 = 0x72006e00
+```
+
+符号化后 `0x82787a28` 是 curl 的 `trynextip()`（`lib/connect.c` 的
+`while(ai && ai->ai_family != family) ai = ai->ai_next;`）。转储里
+`conn->tempaddr[0]` 指向的 addrinfo（0x46189190）已被释放并复用为
+`"brls/highlight/shadow_feather"` 字符串——即 **DNS addrinfo 链的
+use-after-free**，不是空指针。
+
+设备上还有 11/04 的两份旧转储，说明该崩溃早于 11/06 的 TLS/DNS 改动，属既有
+问题。可疑链路是 curl DNS 缓存项的生命周期（`Curl_resolv_unlock` 后紧接
+`Curl_hostcache_prune`，`hostip.c:704-725`）与尚未完成的非阻塞 connect 之间的
+竞争；此外 XDK CRT 的 `time()` 返回 `秒数 << 32`，`now - timestamp` 在任何
+1 秒以上的间隔都远大于 60，使 curl 的 DNS 过期判断退化为“立刻过期”，放大了
+误释放窗口。本轮只定位，未修改 curl；修复需单独验证。
+
+### 5.15 第十四轮（2026-11-06，打开直播直接卡死：XNet DNS 的 8 条 A 记录上限）
+
+**现象**：从首页切到「直播」并点进任意直播间，整机立刻卡死（网络也断，ping
+不通），只能重启；重启后无 wiliwili 转储（不是标题崩溃）。
+
+**定位**（KDNet 停在 `5: kd>`）：
+
+```
+[x360-low] 20:05:42.682 [XNET:2] pktWarn: DNS packet had more IN/A answers than XNDNS has room
+20:05:42.698 Assertion failure - code c0000420 (first chance)
+818630bc 0fe00019 twi 31,r0,25
+```
+
+`XNDNS` 的 `aina` 只有 8 项（`winsockx.h:1902`）。直播弹幕节点
+`zj-cn-live-comet.chat.bilibili.com` 的名字（CNAME 到
+`jsyz-cn-live-comet.chat.biliapi.com`）在本机一次返回 **15 条 A 记录**
+（路由器 DNS；AliDNS 9 条，DNSPod 7 条），devkit 上链接的 checked xam 在
+解析线程里直接 assert（`0xC0000420`），整机停在断言点。KD 里 `ahi` 忽略断言
+后直播可以正常播放、弹幕连接与 join 都成功——证明只是断言，不是逻辑死锁。
+
+**修复**（本仓库内，两个调用点都改）：
+
+1. `third_party/curl/lib/xbox360_stubs.c`：新增自有 UDP DNS 客户端
+   `x360_dns_lookup_a()`（223.5.5.5 / 119.29.29.29 / 114.114.114.114 依次尝试，
+   带 EDNS0 1232 字节，避免 CNAME+9~15 条 A 记录超过 512 字节被截断），
+   `gethostbyname()` 先走它，失败才回退 `XNetDnsLookup`；结果仍进原有的
+   `[dns]` 缓存。
+2. `library/mongoose/mongoose.c` 的 `mg_xbox360_resolve()`：直播弹幕 WebSocket
+   走 mongoose 自己的解析路径，同样先调 `x360_dns_lookup_a()`（跨库符号，
+   mongoose 在链接顺序上先于 libcurl，未定义符号由后者补上），XNet 只兜底。
+
+**实测**：`[dns] udp api.bilibili.com -> 36.158.237.15`、`[dns] udp i0.hdslb.com
+-> ...` 正常；进入直播间后画面/弹幕/人气均正常，KD 日志中不再出现
+`udp failed`，整机不再卡死。副作用是 DNS 不再经过 XNet 的全局锁，首次解析
+更快（实测 dns 段 30ms 量级）。
+
+**注意**：该改动在 `library/mongoose` 子模块里（分支 xbox360），父仓库需要
+同时提交 gitlink，并先把子模块 commit 推到 `Ral-sei/mongoose`。
+
 ---
 
 ## 6. 待决策问题
