@@ -13,6 +13,11 @@
 #include "utils/string_helper.hpp"
 #include "api/bilibili/util/http.hpp"
 
+#if defined(PLATFORM_XBOX360)
+#include <deque>
+#include <functional>
+#endif
+
 #ifdef USE_WEBP
 #include <webp/decode.h>
 #endif
@@ -102,18 +107,55 @@ static void dxt_compress(uint8_t *dst, uint8_t *src, uint32_t w, uint32_t h, boo
 #if defined(PLATFORM_XBOX360)
 // CPR's Xbox worker uses an XDK thread so image transfer and decoding stay
 // off the UI thread. Texture creation remains in the brls::sync callback.
+//
+// Only a few downloads are handed to cpr at a time.  cpr's Xbox pool is FIFO
+// and shared with API requests, so queueing a whole grid of covers pushes a
+// page's request behind every image in it: measured q1 (submit -> worker
+// start) of 9.6 s for the favourites list, whose request itself took 0.7 s.
+// Keeping three downloads in flight leaves the download rate unchanged (the
+// pool has three workers) while the queue in front of an API request stays
+// at most three images deep.
 class ImageThreadPool : public brls::Singleton<ImageThreadPool> {
 public:
     ImageThreadPool() = default;
 
     template <typename Fn>
     void Submit(Fn&& fn) {
-        cpr::async(std::forward<Fn>(fn));
+        {
+            brls::PlatformLockGuard lock(mutex_);
+            pending_.emplace_back(std::forward<Fn>(fn));
+        }
+        startNext();
     }
 
     CURLSH* getShare() { return share.getShare(); }
 
 private:
+    static constexpr int kMaxInFlight = 3;
+
+    // Submits queued work while fewer than kMaxInFlight downloads are running.
+    void startNext() {
+        std::function<void()> task;
+        {
+            brls::PlatformLockGuard lock(mutex_);
+            if (inFlight_ >= kMaxInFlight || pending_.empty()) return;
+            task = std::move(pending_.front());
+            pending_.pop_front();
+            ++inFlight_;
+        }
+        cpr::async([this, task = std::move(task)]() {
+            task();
+            {
+                brls::PlatformLockGuard lock(mutex_);
+                --inFlight_;
+            }
+            startNext();
+        });
+    }
+
+    brls::PlatformMutex mutex_;
+    std::deque<std::function<void()>> pending_;
+    int inFlight_ = 0;
     bilibili::CurlSharedObject share;
 };
 #else

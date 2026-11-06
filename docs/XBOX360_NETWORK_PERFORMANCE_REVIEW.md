@@ -598,6 +598,40 @@ this->texture = tex;
 - 若验收后仍想缓存更多封面，走 PSV 路线：把 Xbox360 的 `h_ext`/`v_ext` 降到 `@448w_252h`（448KB/张，200 张 = 90MB）或给 `nanovg_d3d9` 加 DXT 上传（当前无此能力）。
 - **独立现象待查**：直播页封面走 `https://` 时出现 `err=10`（`SSL_CONNECT_ERROR`，`cancel=false` 真失败），与主页 `http://` 封面不同；本轮无暇展开。
 
+### 5.12 第十一轮（2026-11-06，收藏页一直转圈：图片把共享队列占满）
+
+> 环境：devkit 192.168.2.9，登录态；`[x360-net]` 埋点。
+
+**现象**：从历史记录页切到「我的收藏」，页面一直停在骨架屏。
+
+**数据**（切页瞬间）：
+
+```
+GET https://api.bilibili.com/x/v3/fav/resource/list | q1 9643.8 q2 295.5 dns 1.0 conn 104 tls 362 total 682 ms
+GET https://api.bilibili.com/x/v3/fav/resource/list | q1 2022.9 q2 116.8 dns 0.0 conn 157 tls 519 total 954 ms
+```
+
+请求本身只要 0.7–1.0 s，`q1`（提交 → worker 开始）却要 2–9.6 s：历史页几十张封面
+已经排在 cpr 的 Xbox 池里，而该池是**单一 FIFO 队列且 API 与图片共用**（`async.h`
+`XboxAsyncPool`，3 worker）。PSV/桌面不受影响，因为它们的 `ImageThreadPool`
+是独立的 `cpr::ThreadPool`（`image_helper.cpp` 非 Xbox 分支）。
+
+**修复**：`ImageThreadPool`（Xbox 分支）在应用层只把 **3 张**图片交给 cpr，
+其余留在自己的待发队列里，完成一张再放一张。并发度与池的 worker 数一致，
+下载速率不变，但 API 请求前面的队列最多只有 3 张图（≈1–2 s）。
+
+**试过并回退的两种方案**（都在真机上把界面卡死，控制构建同窗对照正常）：
+
+1. 共享池加两级优先队列（API 高、图片低）：偶发启动卡骨架屏 / `WBI 签名获取失败`；
+2. 图片独立 `XboxAsyncPool` 实例（2 worker）：启动即冻结。
+
+两者的共同点都动了 `async.h` 的提交路径，怀疑与该文件里“函数内静态单例 + Xenon
+libc++ guard 不可重入”的既有注释有关；没有 KD 栈可证实，故不留在树里。
+
+**顺带发现的固有成本**（上一轮 TLS session 复用之后仍然存在）：每域名首次 DNS
+（0.05–2.3 s，`xbox360_stubs.c` 的全局锁跨 `XNetDnsLookup` 等待）+ 首次完整握手；
+之后走缓存/会话恢复。
+
 ---
 
 ## 6. 待决策问题
