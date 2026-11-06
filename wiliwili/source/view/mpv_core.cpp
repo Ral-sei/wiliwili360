@@ -651,12 +651,9 @@ void MPVCore::init() {
         mpvSetOptionString(mpv, "demuxer-max-bytes", fmt::format("{}MiB", MPVCore::INMEMORY_CACHE).c_str());
         mpvSetOptionString(mpv, "demuxer-max-back-bytes", fmt::format("{}MiB", MPVCore::INMEMORY_CACHE / 2).c_str());
 #if defined(PLATFORM_XBOX360)
-        // Byte budget alone was not enough: with six decode workers on three
-        // cores the demuxer/network thread starves and the cache sits at 3-4 s
-        // until it hits zero and playback pauses for cache.  Ask the demuxer
-        // for a much deeper readahead so a stall is absorbed instead of shown.
-        mpvSetOptionString(mpv, "cache-secs", "30");
-        mpvSetOptionString(mpv, "demuxer-readahead-secs", "30");
+        // Keep the stock 10 s readahead/cache-secs (same as the other ports);
+        // only loosen the network timeout so a slow CDN node is not declared
+        // stalled before the cache has a chance to refill.
         mpvSetOptionString(mpv, "network-timeout", "30");
 #endif
     } else {

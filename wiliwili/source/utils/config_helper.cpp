@@ -257,11 +257,6 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
 #elif defined(__SWITCH__)
     {SettingItem::PLAYER_INMEMORY_CACHE,
      {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 0}},
-#elif defined(PLATFORM_XBOX360)
-    // 1080p 实测读流线程只喂到 3-4 秒就上不去（decode 线程抢核），
-    // 默认 10MB 顶不住网络抖动：抬到 20MB 并配合下面的 readahead。
-    {SettingItem::PLAYER_INMEMORY_CACHE,
-     {"player_inmemory_cache", {"0MB", "20MB", "50MB", "100MB"}, {0, 20, 50, 100}, 1}},
 #else
     {SettingItem::PLAYER_INMEMORY_CACHE,
      {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 1}},

@@ -632,7 +632,7 @@ void SettingActivity::onContentAvailable() {
 
     /// In-memory cache
     // Labels are taken from the same option map as the values so the two can
-    // never fall out of sync (e.g. Xbox 360 ships 4 entries, desktop has 5).
+    // never fall out of sync (the entry count differs per platform).
     auto inmemoryOption = conf.getOptionData(SettingItem::PLAYER_INMEMORY_CACHE);
     std::vector<std::string> inmemoryLabels = inmemoryOption.optionList;
     if (!inmemoryLabels.empty()) inmemoryLabels[0] += " (" + "hints/off"_i18n + ")";
