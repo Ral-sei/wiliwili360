@@ -6,3 +6,7 @@ scripts/ffmpeg_x360_configure_local.sh -text
 scripts/x360-ld-fake.sh -text
 scripts/x360-pkg-config.sh -text
 scripts/build_xbox360_linux.sh -text
+
+# Patch files must stay byte-exact: with core.autocrlf=true a CRLF context
+# line no longer matches the LF sources and `patch -p1` rejects the hunk.
+*.patch -text
