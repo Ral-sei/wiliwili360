@@ -53,6 +53,7 @@ FLV `quality >= 80` 进 CATCHUP 档，其余进全质量档），不需要用户
 | `skipframe=` | no\|bidir\|nonref\|all | `vd-lavc-skipframe` 覆盖（CATCHUP 丢帧策略）。**mpv init 时生效**；优先于按画质的自动门控 | 依画质档 |
 | `skiploop=` | nonref\|all\|… | `vd-lavc-skiploopfilter` 覆盖 | 依画质档 |
 | `audio_buffer=` | 秒 | AO 设备环大小（`audio-buffer`）。1.0 吸收启动突发防欠载 | 1.0 |
+| `recv_buffer_k=` | 4..256 | 媒体 socket TCP 接收窗口（`stream-lavf-o recv_buffer_size`，SO_RCVBUF，KB）。调小减轻 XNet 共享缓冲池压力（防 `poolWarn: Pool allocation failed`），调大改善高 RTT 链路吞吐 | 64 |
 | `mpvopt=` | `键=值` | 任意 mpv **初始化前**选项透传，如 `mpvopt=video-sync=audio` | — |
 | `avopts=` | `键=值[,键=值…]` | 透传到 `vd-lavc-o`（libavcodec AVOptions），如 `avopts=thread_type=slice` | — |
 

@@ -667,7 +667,18 @@ void MPVCore::init() {
     // sitting at 0-2 s and "paused for cache" every few seconds.  FFmpeg's tcp
     // protocol forwards this to SO_RCVBUF (tcp.c), and lavf options reach it
     // through the tls wrapper.  Ignored harmlessly if XNet clamps it.
-    mpvSetOptionString(mpv, "stream-lavf-o", "recv_buffer_size=262144");
+    //
+    // 256 KB was too much of a good thing: SO_RCVBUF is backed by XNet's
+    // *shared* buffer pool, and a media socket whose reader pauses (mpv cache
+    // full, seek, demuxer parse) pins its whole window of pool blocks.  Two
+    // DASH sockets (video+audio) at 256 KB each can hold 512 KB of the pool
+    // and starve every other socket -- XNet then drops incoming segments
+    // ("poolWarn: Pool allocation failed" / "tcpWarn: ... 1324 bytes lost"),
+    // which corrupts the TLS streams and shows up as the moov/packet reads
+    // failing ("Invalid data found when processing input", i.e. 视频解析不出来).
+    // 64 KB still allows ~1.3 MB/s at a 50 ms data RTT (streams are well
+    // under 1 MB/s); recv_buffer_k= in game:\x360_play.cfg overrides it.
+    mpvSetOptionString(mpv, "stream-lavf-o", "recv_buffer_size=65536");
     // Mirror wiliwili's "TLS verify" setting (SettingItem::TLS_VERIFY, after
     // the console-clock downgrade) into mpv's tls-verify so the lavf stream
     // option agrees with the curl transport.  FFmpeg's tls backend applies the
@@ -825,6 +836,16 @@ void MPVCore::init() {
                 // CABAC/recon cycle-counter split (H264SliceContext.x360_prof
                 // in libavcodec; prints [x360-h264prof] lines to the log).
                 xbox360_h264_prof_enabled = n ? 1 : 0;
+            }
+            else if (sscanf(line, "recv_buffer_k=%d", &n) == 1 && n >= 4 && n <= 256)
+            {
+                // Media-socket TCP receive window (SO_RCVBUF) in KB.  Small
+                // keeps XNet's shared buffer pool free for the other sockets
+                // (see the stream-lavf-o comment above); large helps on
+                // high-RTT links.  Applied here so it wins over the default.
+                mpvSetOptionString(mpv, "stream-lavf-o",
+                                   fmt::format("recv_buffer_size={}", n * 1024).c_str());
+                brls::Logger::info("[x360-play] stream-lavf-o recv_buffer_size={} (override)", n * 1024);
             }
             else if (sscanf(line, "skipframe=%15s", optval) == 1)
             {

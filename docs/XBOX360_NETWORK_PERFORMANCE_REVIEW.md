@@ -751,6 +751,58 @@ use-after-free**，不是空指针。
 
 ---
 
+### 5.16 第十五轮（2026-11-09，视频解析不出来：XNet 共享缓冲池被媒体 socket 的 256KB 窗口抽干）
+
+**现象**：视频页信息加载正常，但流一开就挂——mov demuxer 读 moov/包数据报
+`partial file` / `error reading packet: Invalid data found when processing input`
+（即"视频解析不出来"），不是网速也不是 CDN。KDNet 日志同时大量刷：
+
+```
+[WARNING] ffmpeg: https: Will reconnect at 3626563 in 0 second(s), error=I/O error
+[XNET:1] poolWarn: Pool allocation failed: 43 blocks
+[XNET:1] poolWarn: Make sure you promptly call recv() to receive incoming data.
+[XNET:2] tcpWarn: [3006xxxx] Out of memory allocating receive buffer. 1324 bytes lost.
+...（多个 socket 句柄持续刷屏）
+[ERROR] ffmpeg: tls: mbedtls_ssl_handshake returned -0x4e      ← MBEDTLS_ERR_NET_SEND_FAILED
+[ERROR] ffmpeg: Seek failed (to 3482, size 51666500)
+[ERROR] ffmpeg/demuxer: mov,mp4,m4a,3gp,3g2,mj2: stream 0, offset 0xd9a: partial file
+[WARNING] lavf: error reading packet: Invalid data found when processing input
+```
+
+**根因**：XNet 的接收缓冲是**全 socket 共享的固定池**，每个 socket 的接收窗口
+（SO_RCVBUF）由池兜底。`mpv_core.cpp` 曾把媒体 socket 的 `recv_buffer_size`
+提到 **262144（256KB）**（01bb1524，为治 window/RTT 吞吐），是默认 16KB 的 16 倍：
+
+1. DASH = 视频 + 音频两条流，各 256KB 窗口；
+2. mpv 缓存读满（stock 10MB/10s）或 demuxer 在解析/seek 时**停读**——此时
+   TCP 照常收满整个窗口，**2 × 256KB 池块被两条媒体 socket 钉住**；
+3. 池见底 → 其余 socket（API/图片/新连接握手）全部 `1324 bytes lost` 丢包
+   → TLS 流损坏 → `error=I/O error` → ffmpeg 重连；
+4. 重连时 `http_seek_internal` 按"失败可回退"语义**保留旧 socket** 直到新连接
+   建立——旧 socket 的接收队列在整个 DNS+TCP+TLS 期间继续占池，新握手正好
+   在这个窗口里拿不到缓冲（`handshake -0x4e` 发送失败）→ `Seek failed` →
+   moov 读成 `partial file` → `Invalid data found`。
+
+**修复**（两处）：
+
+1. `wiliwili/source/view/mpv_core.cpp`：`recv_buffer_size` **262144 → 65536**。
+   64KB 在 50ms 数据 RTT 下仍有 ~1.3MB/s（流码率 ≤1MB/s），双流最坏只钉
+   128KB 池。新增运行时开关 `recv_buffer_k=`（`game:\x360_play.cfg`，4..256）
+   供高 RTT 链路无重编调大（见 `docs/XBOX360_RUNTIME_KNOBS.md` §1）。
+2. `third_party/ffmpeg-4.4.8/libavformat/http.c`：`http_seek_internal` 在
+   `force_reconnect`（即读错误后的重连，`http_read_stream` 唯一调用点）时
+   **先关旧 socket** 再建新连接——旧连接已读失败，留作回退无意义，而它的
+   接收队列正是重连期占池的元凶。失败回退路径相应跳过恢复旧连接
+   （`http_read_stream` 加 `if (!s->hd)` 保护，保持原错误码返回）。
+
+**待验证**（devkit）：重载同一支视频应能正常起播；KDNet 不再出现
+`poolWarn`/`tcpWarn` 刷屏。若高 RTT 下吞吐不足，`recv_buffer_k=128` 复测。
+若 64KB 下仍见 pool 告警，说明池本身小于估算——下一杠杆是
+`XNetStartupParams`（`cfgSockDefaultRecvBufsizeInK` 等）显式放大池预算
+（`xbox360_network_runtime.cpp`，当前全零 = 默认）。
+
+---
+
 ## 6. 待决策问题
 
 1. ~~**是否先从 #1 测量做起？**~~ **已执行**（2026-10-02）：埋点与实测数据见 §5，

@@ -1600,6 +1600,9 @@ static int http_read_stream(URLContext *h, uint8_t *buf, int size)
             return read_ret;
         }
 
+        if (!s->hd)
+            return read_ret;
+
         read_ret = http_buf_read(h, buf, size);
     }
 
@@ -1815,6 +1818,22 @@ static int64_t http_seek_internal(URLContext *h, int64_t off, int whence, int fo
         if (s->off >= end_pos)
             return s->off;
     }
+
+#if defined(_XBOX)
+    /* Reconnect-after-error (http_read_stream calls us with force_reconnect=1):
+       the old connection already failed its read, so keeping it alive as a
+       fallback is pointless -- and on Xbox it is actively harmful.  Its
+       receive queue (up to SO_RCVBUF: 64-256 KB on media sockets) stays
+       pinned in XNet's shared buffer pool for the whole DNS+TCP+TLS setup of
+       the replacement connection, which is exactly when that pool must serve
+       the new handshake; the pool then runs dry ("poolWarn: Pool allocation
+       failed" / "tcpWarn: ... bytes lost") and the handshake dies with
+       MBEDTLS_ERR_NET_SEND_FAILED (-0x4e).  Free the old socket first. */
+    if (force_reconnect && old_hd) {
+        ffurl_close(old_hd);
+        old_hd = NULL;
+    }
+#endif
 
     /* we save the old context in case the seek fails */
     old_buf_size = s->buf_end - s->buf_ptr;
