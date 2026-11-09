@@ -244,3 +244,34 @@ DC 置零覆盖各分支），失配回退 C 并打 WARNING。4:2:2 的 `add8` �
 但 mcd 占比在 vmx=1 下仍 55%，且 6 worker 每线程周期翻倍 → **内存受限**，
 继续写内核撞带宽墙。详见
 `XBOX360_PLAYBACK_PERFORMANCE_PLAN.md` §15.10（剖析仪器 `prof=1`）。
+
+## 11. 2026-11-09：chroma MC 改可分离整数内核（复刻 ffmpeg-xenon）
+
+来源：`H:\ffmpeg-xenon-ffmpeg-9.0.2\ffmpeg-xenon` commit `1eed789`
+（"port: refresh FFmpeg 9.0.2 kernels, pacing, and build tooling"）中
+libavcodec 的 chroma MC 部分，移植到本仓库的 `xbox360/h264_vmx.c`。
+
+- **算法**：旧 M1 实现走 FP 桥（vcfsx → vmaddfp → vctsxs）算 4 个 2-D 权重；
+  新实现用可分离形式替代，权重 0..7 全部走 3-bit 移位加法，不再碰 FP：
+  `h0 = 8*s0 + x*(s1-s0)`、`h1 = 8*s2 + x*(s3-s2)`、`out = 8*h0 + y*(h1-h0)`，
+  末尾 `(out + 32) >> 6`。中间值核算：h0/h1 ≤ 2040、out ≤ 16320，+32 后
+  仍 < 2^15，算术右移与 C 参考逐位一致。舍入常量是 **32（1<<5）**——
+  ffmpeg-xenon 早期版本误写成 `__vspltish(5)`（=16），此处取其修正后版本。
+- **移位量经 volatile 读取**：防止 LLVM 把 `v + (v<<1)` 之类折叠回
+  `v*3`（InstCombine 规范形），PPC 后端随后选中 Xenon 没有的
+  `vmladduhm`（bugcheck `c000001d`）。同 §8 坑 #2 / `p6_q6_16` 的做法。
+- **接口不变**：`ff_put/avg_h264_chroma_mc8/4_x360`、`ff_h264_vmx_chroma_selftest`
+  签名不动，`cbffmpeg/tests/p6_h264` 直接 `#include` 源文件的真机对拍继续有效
+  （复刻后需重跑一次对拍再上线）。
+- **新增构建宏 `X360_CHROMA_MASK`**（位 1=put8/2=put4/4=avg8/8=avg4，默认 15），
+  按位注册内核用于单内核 A/B，见 `scripts/ffmpeg_x360_configure_local.sh`；
+  对应 ffmpeg-xenon `xdk/build.py` 的 `--chroma-mask`。
+- **同源提交的其余部分不在 FFmpeg 范围内**：xdk runtime 的 vblank 计数/
+  event 等待/present-lead 补偿/交换链 A/B/XAudio2 池属呈现侧（wiliwili 由
+  mpv/D3D9 承担）；stdatomic 非显式 `atomic_fetch_*` 形态与 mathtables
+  `#if 1` 是 ffmpeg-xenon 为 FFmpeg 9 + MSVC/LTCG 链接所做，4.4.8 +
+  clang（自带 stdatomic.h、mathtables.c 无 `CONFIG_ME_CMP` 门）不需要。
+- **预期收益要重新测**：ffmpeg-xenon 报的 +8.8%（1080p30）/+19.3%（720p60）
+  是相对其 **C 参考** chroma；本仓库 M1 已是 VMX（FP 桥），换成整数形式的
+  增量只在 FP 桥那部分，且 §10.3 已判定 mcd 内存受限（带宽墙）。
+  收益归因用 `X360_CHROMA_MASK` + `prof=1` 真机 A/B。

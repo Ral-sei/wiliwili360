@@ -22,6 +22,11 @@
 # 重新 configure/编译；FFmpeg 是预编译库，它和 CMake 侧的
 # XBOX360_RUNTIME_PROBES 是两个独立开关。
 #
+# 内核微基准：chroma MC VMX128 内核的按位注册掩码（-DX360_CHROMA_MASK），
+# 位 1=put8 / 2=put4 / 4=avg8 / 8=avg4，默认 15 全开；只注册单个内核做真机
+# A/B 时用，如 `X360_CHROMA_MASK=1 sh scripts/ffmpeg_x360_configure_local.sh`。
+# 对应 ffmpeg-xenon xdk/build.py 的 --chroma-mask。
+#
 # 网络探测的现实（与 P2/P3 的"探测一律假阳性"同一根源，见
 # scripts/x360-cc-fake.sh / x360-ld-fake.sh 注释）：
 #   - check_func / check_func_headers 是 **链接** 探测（程序体只是
@@ -90,6 +95,7 @@ CFLAGS="-target powerpc-unknown-none-elf -O2 -ffreestanding -fno-builtin -fms-ex
  -Dsnprintf=avpriv_snprintf -Dvsnprintf=avpriv_vsnprintf \
  -I$MBEDTLS_CONFIG -I$MBEDTLS/include \
  -DX360_RUNTIME_PROBES=${X360_RUNTIME_PROBES:-0} \
+ -DX360_CHROMA_MASK=${X360_CHROMA_MASK:-15} \
  -D_XBOX"
 
 mkdir -p "$BLD"

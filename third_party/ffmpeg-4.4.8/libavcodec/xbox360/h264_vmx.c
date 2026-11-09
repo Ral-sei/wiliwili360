@@ -3,10 +3,16 @@
  *
  * Xenon removed 22 vector *integer* multiply-add instructions (vmule*, vmulo*,
  * vmladduhm, vmsum*, ...), which is exactly what FFmpeg's libavcodec/ppc
- * H.264 code uses, so `--disable-altivec` was needed to build at all.  The
- * replacement path is the FP bridge: vcfsx -> vmaddfp -> vctsxs, which is
- * bit-exact for integer products while |a*b + c| < 2^24 (chroma 4-tap sum is
- * at most 65280).  See cbffmpeg/docs/p6_altivec_preflight.md.
+ * H.264 code uses, so `--disable-altivec` was needed to build at all.  Chroma
+ * MC avoids multiply altogether: the 2-D bilinear weights collapse to a
+ * separable pair of 3-bit shift/add stages (see p6_chroma_interp below),
+ * bit-exact for every weight.  Earlier revisions routed the four weights
+ * through an FP bridge (vcfsx -> vmaddfp -> vctsxs, bit-exact while
+ * |a*b + c| < 2^24); the separable integer form replaced it (ported from the
+ * ffmpeg-xenon FFmpeg 9.0.2 port, commit 1eed789).  Shift counts go through
+ * volatile so LLVM cannot fold the shift/add sequences back into an integer
+ * multiply (see the p6_q6_16 note in h264_qpel_vmx.c).  See
+ * cbffmpeg/docs/p6_altivec_preflight.md.
  *
  * This file is compiled with -maltivec -fno-vectorize -fno-slp-vectorize so
  * every vector instruction comes from the hand written vec_* below and clang
@@ -46,73 +52,80 @@
 #include "vmx_util.h"
 #include "h264_vmx.h"
 
-/* vec_unpackh of a u8 is a *sign* extension, the & 0x00FF clears the high
- * halfword back to the unsigned value. */
-P6_INLINE vf p6_cvt_lo(v8 v) { return vec_ctf(vec_unpackh(v), 0); }
-P6_INLINE vf p6_cvt_hi(v8 v) { return vec_ctf(vec_unpackl(v), 0); }
-
-/* (A*a + B*b + C*c + D*d + 32) >> 6 for one row, 8 output bytes in lanes 0..7. */
-P6_INLINE v16 p6_mc_row(const uint8_t *src, ptrdiff_t stride,
-                        vf vA, vf vB, vf vC, vf vD)
+/* 3-bit multiplier: k * v for runtime k = 0..7, shifts and adds only.
+ * The shift counts are the volatile splats passed in from p6_mc, so the
+ * sequence cannot be folded back into vmladduhm (see the file header). */
+P6_INLINE v8 p6_mul_small(v8 v, int k, v8 one, v8 two)
 {
-    const v8  mask = (v8)vec_splats((unsigned short)0x00FF);
-    const vf  v32  = vec_splats(32.0f);
-    const vf  vInv = vec_splats(1.0f / 64.0f);
+    switch (k) {
+    case 0:  return vec_splats((short)0);
+    case 1:  return v;
+    case 2:  return vec_sl(v, one);
+    case 3:  return vec_add(v, vec_sl(v, one));
+    case 4:  return vec_sl(v, two);
+    case 5:  return vec_add(v, vec_sl(v, two));
+    case 6:  return vec_add(vec_sl(v, one), vec_sl(v, two));
+    default: return vec_add(vec_add(v, vec_sl(v, one)), vec_sl(v, two));
+    }
+}
 
-    v16 r0  = p6_loadu(src);
-    v16 r0s = vec_sld(r0, r0, 1);
-    v16 r1  = p6_loadu(src + stride);
-    v16 r1s = vec_sld(r1, r1, 1);
+/* Separable form of the C reference
+ *   (A*s0 + B*s1 + C*s2 + D*s3 + 32) >> 6,
+ * A=(8-x)*(8-y), B=x*(8-y), C=(8-x)*y, D=x*y:
+ *   h0  = (8-x)*s0 + x*s1 = 8*s0 + x*(s1 - s0)
+ *   h1  = (8-x)*s2 + x*s3 = 8*s2 + x*(s3 - s2)
+ *   out = (8-y)*h0 + y*h1 = 8*h0 + y*(h1 - h0)
+ * Two 3-bit multiplies per stage instead of four 2-D weights, and every
+ * intermediate fits a signed halfword: h0/h1 <= 2040, out <= 16320 (plus
+ * the 32 rounding constant still < 2^15), so the arithmetic >> 6 matches
+ * the C reference bit for bit.  The rounding constant is 32 (1 << 5). */
+P6_INLINE v8 p6_chroma_interp(v8 s0, v8 s1, v8 s2, v8 s3,
+                              int x, int y, v8 one, v8 two)
+{
+    const v8 three = vec_splats((short)3);
+    const v8 round = vec_splats((short)32);
+    const v8 sh    = vec_splats((short)6);
 
-    v8 a = vec_and((v8)vec_unpackh((vs8)r0),  mask);
-    v8 b = vec_and((v8)vec_unpackh((vs8)r0s), mask);
-    v8 c = vec_and((v8)vec_unpackh((vs8)r1),  mask);
-    v8 d = vec_and((v8)vec_unpackh((vs8)r1s), mask);
-
-    vf lo = vec_madd(vA, p6_cvt_lo(a), v32);
-    lo = vec_madd(vB, p6_cvt_lo(b), lo);
-    lo = vec_madd(vC, p6_cvt_lo(c), lo);
-    lo = vec_madd(vD, p6_cvt_lo(d), lo);
-    v4 ilo = vec_cts(vec_mul(lo, vInv), 0);
-
-    vf hi = vec_madd(vA, p6_cvt_hi(a), v32);
-    hi = vec_madd(vB, p6_cvt_hi(b), hi);
-    hi = vec_madd(vC, p6_cvt_hi(c), hi);
-    hi = vec_madd(vD, p6_cvt_hi(d), hi);
-    v4 ihi = vec_cts(vec_mul(hi, vInv), 0);
-
-    v8  p16 = (v8)vec_pack(ilo, ihi);
-    return (v16)vec_pack(p16, p16);
+    v8 h0  = vec_add(vec_sl(s0, three), p6_mul_small(vec_sub(s1, s0), x, one, two));
+    v8 h1  = vec_add(vec_sl(s2, three), p6_mul_small(vec_sub(s3, s2), x, one, two));
+    v8 out = vec_add(vec_sl(h0, three), p6_mul_small(vec_sub(h1, h0), y, one, two));
+    return vec_sra(vec_add(out, round), sh);
 }
 
 /* w = 4 or 8 destination pixels, avg = 0 (put) or 1 (rnd_avg with dst).
- * The weights are 0..7 and A+B+C+D == 64, so the special cases FFmpeg's C
- * reference carves out (D == 0, B + C == 0) fall out of the same formula. */
+ * All x/y weights share the one separable formula, including the cases the
+ * C reference carves out (D == 0, B + C == 0). */
 P6_INLINE void p6_mc(uint8_t *dst, const uint8_t *src, ptrdiff_t stride,
                      int h, int x, int y, const int w, const int avg)
 {
-    const int A = (8 - x) * (8 - y);
-    const int B = (    x) * (8 - y);
-    const int C = (8 - x) * (    y);
-    const int D = (    x) * (    y);
-    const vf vA = vec_splats((float)A);
-    const vf vB = vec_splats((float)B);
-    const vf vC = vec_splats((float)C);
-    const vf vD = vec_splats((float)D);
+    /* volatile-loaded shift counts: see the file header and p6_mul_small */
+    static const volatile short p6_chroma_sh1[8] __attribute__((aligned(16))) =
+        { 1, 1, 1, 1, 1, 1, 1, 1 };
+    static const volatile short p6_chroma_sh2[8] __attribute__((aligned(16))) =
+        { 2, 2, 2, 2, 2, 2, 2, 2 };
+    short t[8];
+    v8 one, two;
+
+    for (int i = 0; i < 8; i++)
+        t[i] = p6_chroma_sh1[i];
+    __builtin_memcpy(&one, t, 16);
+    for (int i = 0; i < 8; i++)
+        t[i] = p6_chroma_sh2[i];
+    __builtin_memcpy(&two, t, 16);
 
     for (int i = 0; i < h; i++) {
-        v16 p8 = p6_mc_row(src, stride, vA, vB, vC, vD);
+        v16 r0  = p6_loadu(src);
+        v16 r0s = vec_sld(r0, r0, 1);
+        v16 r1  = p6_loadu(src + stride);
+        v16 r1s = vec_sld(r1, r1, 1);
+
+        v8 r = p6_chroma_interp(p6_widen_lo(r0), p6_widen_lo(r0s),
+                                p6_widen_lo(r1), p6_widen_lo(r1s),
+                                x, y, one, two);
+        v16 p8 = (v16)vec_packsu(r, r);   /* 8 result bytes in lanes 0..7 */
         if (avg)                       /* vavgub == (a + b + 1) >> 1 == rnd_avg */
             p8 = vec_avg(p8, p6_loadu(dst));
-        if (w == 8) {
-            uint64_t o;
-            __builtin_memcpy(&o, &p8, 8);
-            __builtin_memcpy(dst, &o, 8);
-        } else {
-            uint32_t o;
-            __builtin_memcpy(&o, &p8, 4);
-            __builtin_memcpy(dst, &o, 4);
-        }
+        p6_store(dst, p8, w);
         dst += stride;
         src += stride;
     }
@@ -227,6 +240,14 @@ int ff_h264_vmx_chroma_selftest(p6_mc_func c_put8, p6_mc_func c_put4,
 
 extern int xbox360_vmx128_enabled;
 
+/* Per-kernel registration mask for single-kernel A/B benchmarks:
+ * bit 1 put 8-wide, bit 2 put 4-wide, bit 4 avg 8-wide, bit 8 avg 4-wide.
+ * Default 15 registers everything (see X360_CHROMA_MASK in
+ * scripts/ffmpeg_x360_configure_local.sh). */
+#ifndef X360_CHROMA_MASK
+#define X360_CHROMA_MASK 15
+#endif
+
 void ff_h264chroma_init_x360(H264ChromaContext *c, int bit_depth)
 {
     static int selftest = -1;
@@ -247,12 +268,21 @@ void ff_h264chroma_init_x360(H264ChromaContext *c, int bit_depth)
         return;
     }
 
+#if X360_CHROMA_MASK & 1
     c->put_h264_chroma_pixels_tab[0] = (h264_chroma_mc_func)ff_put_h264_chroma_mc8_x360;
+#endif
+#if X360_CHROMA_MASK & 2
     c->put_h264_chroma_pixels_tab[1] = (h264_chroma_mc_func)ff_put_h264_chroma_mc4_x360;
+#endif
+#if X360_CHROMA_MASK & 4
     c->avg_h264_chroma_pixels_tab[0] = (h264_chroma_mc_func)ff_avg_h264_chroma_mc8_x360;
+#endif
+#if X360_CHROMA_MASK & 8
     c->avg_h264_chroma_pixels_tab[1] = (h264_chroma_mc_func)ff_avg_h264_chroma_mc4_x360;
+#endif
 
-    av_log(NULL, AV_LOG_INFO, "x360 h264 chroma: VMX128 kernels on\n");
+    av_log(NULL, AV_LOG_INFO, "x360 h264 chroma: VMX128 kernels on (mask %d)\n",
+           X360_CHROMA_MASK);
 }
 
 #endif /* XBOX && !P6_STANDALONE */

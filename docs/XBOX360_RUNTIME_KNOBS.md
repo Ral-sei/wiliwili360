@@ -61,6 +61,9 @@ FLV `quality >= 80` 进 CATCHUP 档，其余进全质量档），不需要用户
 - `skipframe`/`skiploop`/`audio_buffer`/`mpvopt`/`avopts` 均须在 `mpv_initialize()`
   之前设置才生效（运行时 set 属性解码器不采用，实测见性能计划 §15.9）。
 - `vmx` 在解码器 init 时读取，切换后需重启应用。
+- `vmx` 之下的单内核粒度开关是**构建期**宏 `X360_CHROMA_MASK`（chroma MC
+  按位注册：1=put8/2=put4/4=avg8/8=avg4，默认 15），重新
+  configure/编译 FFmpeg 生效，见 `scripts/ffmpeg_x360_configure_local.sh`。
 - 所有覆盖项在日志打 `[x360-play] … (override)`。
 
 ### 示例
